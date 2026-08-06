@@ -1,0 +1,26 @@
+schema_version: 1
+base_model: Qwen/Qwen2.5-Coder-1.5B-Instruct
+model_revision: 2e1fd397ee46e1388853d2af2c993145b0f1098a
+train_data: ../outputs/sft/train.jsonl
+validation_data: ../outputs/sft/validation.jsonl
+output_dir: ../checkpoints/sft
+seed: 42
+max_length: 16384
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+learning_rate: 0.0001
+epochs: 3.0
+per_device_batch_size: 1
+gradient_accumulation_steps: 8
+bf16: true
+save_steps: 100
+logging_steps: 5

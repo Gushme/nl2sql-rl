@@ -1,4 +1,4 @@
-"""Command-line entrypoint. Subsystems register commands as they are implemented."""
+"""项目统一命令行入口。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,13 @@ from nl2sql_rl.models import (
 )
 from nl2sql_rl.teacher.client import LLMClient, LLMClientConfig
 from nl2sql_rl.teacher.collector import CollectorConfig, TeacherAttempt, collect_trajectories
+from nl2sql_rl.training.model_assets import download_model_metadata
+from nl2sql_rl.training.sft import (
+    export_merged_checkpoint,
+    load_sft_config,
+    preflight_sft,
+    run_sft_training,
+)
 from nl2sql_rl.training.sft_data import build_sft_conversations
 
 app = typer.Typer(help="BIRD SQLite Agentic NL2SQL post-training toolkit.")
@@ -439,3 +446,71 @@ def teacher_build_sft(
             indent=2,
         )
     )
+
+
+@train_app.command("fetch-model-metadata")
+def train_fetch_model_metadata(
+    destination: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "models/Qwen2.5-Coder-1.5B-Instruct-metadata"
+    ),
+    manifest: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "data/manifests/qwen_tokenizer_config.json"
+    ),
+    force: Annotated[bool, typer.Option("--force/--no-force")] = False,
+) -> None:
+    """下载固定 revision 的 tokenizer/config，不下载 1.5B 权重。"""
+    report = download_model_metadata(destination, force=force)
+    write_json(manifest, report)
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
+
+
+@train_app.command("sft")
+def train_sft(
+    sft_config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/sft.yaml"
+    ),
+    dry_run: Annotated[bool, typer.Option("--dry-run/--run")] = True,
+    resume_from_checkpoint: Annotated[Path | None, typer.Option(file_okay=False)] = None,
+    preflight_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/sft/preflight.json"
+    ),
+) -> None:
+    """检查或启动 Qwen2.5-Coder-1.5B Action-only LoRA SFT。"""
+    config = load_sft_config(sft_config)
+    report = preflight_sft(
+        config,
+        dry_run=dry_run,
+        resume_from_checkpoint=resume_from_checkpoint,
+    )
+    if dry_run:
+        result: dict[str, object] = report
+    else:
+        result = run_sft_training(config, resume_from_checkpoint=resume_from_checkpoint)
+    write_json(preflight_output, result)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@train_app.command("export")
+def train_export(
+    adapter: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "checkpoints/sft-merged"
+    ),
+    sft_config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/sft.yaml"
+    ),
+    dry_run: Annotated[bool, typer.Option("--dry-run/--run")] = True,
+    report_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/sft/export.json"
+    ),
+) -> None:
+    """检查或执行 LoRA 合并，并生成 GRPO checkpoint handoff manifest。"""
+    config = load_sft_config(sft_config)
+    result = export_merged_checkpoint(
+        config,
+        adapter,
+        output,
+        dry_run=dry_run,
+    )
+    write_json(report_output, result)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))

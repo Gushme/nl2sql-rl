@@ -20,6 +20,15 @@ dependencies = [
   "typer>=0.16,<1",
 ]
 
+[project.optional-dependencies]
+sft = [
+  "accelerate==1.6.0",
+  "peft==0.15.2",
+  "safetensors==0.5.3",
+  "torch==2.6.0",
+  "transformers==4.51.3",
+]
+
 [project.scripts]
 nl2sql-rl = "nl2sql_rl.cli:app"
 
@@ -46,6 +55,7 @@ markers = [
   "full_data: requires the local BIRD dataset",
   "network: requires internet access",
   "gpu: requires a Linux CUDA training environment",
+  "sft_runtime: requires the optional CPU SFT dependency stack",
 ]
 
 [tool.ruff]
