@@ -32,6 +32,13 @@ from nl2sql_rl.models import (
 )
 from nl2sql_rl.teacher.client import LLMClient, LLMClientConfig
 from nl2sql_rl.teacher.collector import CollectorConfig, TeacherAttempt, collect_trajectories
+from nl2sql_rl.training.grpo import (
+    build_verl_command,
+    load_grpo_config,
+    preflight_grpo,
+    prepare_grpo_datasets,
+    run_grpo,
+)
 from nl2sql_rl.training.model_assets import download_model_metadata
 from nl2sql_rl.training.sft import (
     export_merged_checkpoint,
@@ -514,3 +521,26 @@ def train_export(
     )
     write_json(report_output, result)
     typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@train_app.command("grpo")
+def train_grpo(
+    grpo_config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/grpo.yaml"
+    ),
+    dry_run: Annotated[bool, typer.Option("--dry-run/--run")] = True,
+    prepare: Annotated[bool, typer.Option("--prepare/--no-prepare")] = False,
+    preflight_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/grpo/preflight.json"
+    ),
+) -> None:
+    """准备数据、校验 SFT handoff，或启动固定的 100-step Agentic GRPO。"""
+    config = load_grpo_config(grpo_config)
+    dataset_report = prepare_grpo_datasets(config) if prepare else None
+    report = preflight_grpo(config, dry_run=dry_run)
+    report["prepared_data"] = dataset_report
+    report["command"] = build_verl_command(config)
+    if not dry_run:
+        report["return_code"] = run_grpo(config)
+    write_json(preflight_output, report)
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))

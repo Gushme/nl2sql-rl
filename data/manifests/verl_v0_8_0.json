@@ -1,0 +1,16 @@
+{
+  "container": {
+    "digest": "sha256:7b89de392419de3c532b96ea29bf7ac93a083ab965dbb4ec4252adf436d950c3",
+    "image": "verlai/verl:vllm020.dev1",
+    "platform": "linux/amd64",
+    "registry": "https://hub.docker.com/r/verlai/verl"
+  },
+  "schema_version": 1,
+  "source": {
+    "agent_loop": "https://github.com/volcengine/verl/blob/v0.8.0/verl/experimental/agent_loop/agent_loop.py",
+    "commit": "7aed6b230776f963fa09509c10d9c3a767d1102c",
+    "repository": "https://github.com/volcengine/verl",
+    "tag": "v0.8.0",
+    "workflow": "https://github.com/volcengine/verl/blob/v0.8.0/.github/workflows/vllm.yml"
+  }
+}

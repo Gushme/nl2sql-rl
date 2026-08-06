@@ -1,0 +1,2 @@
+# 官方镜像已包含 GPU 依赖，这里仅把 veRL 源码固定到 release commit。
+verl @ git+https://github.com/volcengine/verl.git@7aed6b230776f963fa09509c10d9c3a767d1102c

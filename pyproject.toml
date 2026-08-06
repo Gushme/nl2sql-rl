@@ -7,7 +7,7 @@ name = "nl2sql-rl"
 version = "0.1.0"
 description = "BIRD SQLite multi-turn Agentic NL2SQL post-training pipeline"
 readme = "readme.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.13"
 license = { text = "Apache-2.0" }
 authors = [{ name = "nl2sql-rl contributors" }]
 dependencies = [
@@ -56,6 +56,7 @@ markers = [
   "network: requires internet access",
   "gpu: requires a Linux CUDA training environment",
   "sft_runtime: requires the optional CPU SFT dependency stack",
+  "grpo_runtime: requires the pinned Linux CUDA veRL environment",
 ]
 
 [tool.ruff]

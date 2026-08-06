@@ -1,0 +1,2 @@
+- name: nl2sql_agent_loop
+  _target_: nl2sql_rl.training.verl_agent_loop.NL2SQLAgentLoop
