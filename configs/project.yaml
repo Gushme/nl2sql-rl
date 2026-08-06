@@ -1,0 +1,16 @@
+schema_version: 1
+base_model: Qwen/Qwen2.5-Coder-1.5B-Instruct
+seed: 42
+paths:
+  root: ..
+  train_root: train
+  dev_root: dev500
+  output_root: outputs
+runtime:
+  gold_timeout_seconds: 10.0
+  exploration_timeout_seconds: 2.0
+  max_database_workers: 4
+  max_episode_actions: 10
+  max_action_tokens: 512
+  max_context_tokens: 16384
+  max_observation_bytes: 8192

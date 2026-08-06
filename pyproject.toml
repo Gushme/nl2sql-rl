@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nl2sql-rl"
+version = "0.1.0"
+description = "BIRD SQLite multi-turn Agentic NL2SQL post-training pipeline"
+readme = "readme.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "nl2sql-rl contributors" }]
+dependencies = [
+  "httpx>=0.28,<1",
+  "jinja2>=3.1,<4",
+  "pydantic>=2.11,<3",
+  "pyyaml>=6.0,<7",
+  "sqlglot>=27,<30",
+  "typer>=0.16,<1",
+]
+
+[project.scripts]
+nl2sql-rl = "nl2sql_rl.cli:app"
+
+[dependency-groups]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<8",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+  "types-pyyaml>=6.0,<7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nl2sql_rl"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "full_data: requires the local BIRD dataset",
+  "network: requires internet access",
+  "gpu: requires a Linux CUDA training environment",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["nl2sql_rl"]
