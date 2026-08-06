@@ -24,6 +24,7 @@ class BirdSourceExample(StrictRecord):
     db_id: str
     question: str
     evidence: str
+    difficulty: str | None = None
     gold_sql: str
     gold_file_sql: str | None
     gold_file_db_id: str | None
