@@ -1,4 +1,4 @@
-"""Versioned public records shared by data, harness, training, and evaluation."""
+"""数据、Agent、训练和评测共享的版本化记录。"""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class TaskView(StrictRecord):
     db_ref: str
 
     def actor_payload(self) -> dict[str, Any]:
-        """Return the only task representation allowed in Actor context."""
+        """返回唯一允许进入 Actor 上下文的任务表示。"""
         return self.model_dump(mode="json")
 
 
@@ -63,6 +63,7 @@ ToolName = Literal[
     "execute_sql",
     "submit_sql",
 ]
+ObservationKind = ToolName | Literal["protocol"]
 
 
 class AgentAction(StrictRecord):
@@ -72,7 +73,7 @@ class AgentAction(StrictRecord):
 
 class ToolObservation(StrictRecord):
     event_id: str
-    tool: ToolName
+    tool: ObservationKind
     ok: bool
     payload: dict[str, Any] = Field(default_factory=dict)
     error_code: str | None = None
@@ -83,7 +84,7 @@ class ToolObservation(StrictRecord):
 class TrajectoryEvent(StrictRecord):
     event_id: str
     step: int = Field(ge=0)
-    action: AgentAction
+    action: AgentAction | None
     observation: ToolObservation
 
 

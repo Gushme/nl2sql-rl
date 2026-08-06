@@ -9,12 +9,15 @@ from typing import Annotated
 import typer
 
 from nl2sql_rl import __version__
+from nl2sql_rl.agent.loop import ScriptedPolicy, run_episode
+from nl2sql_rl.agent.replay import replay_episode
 from nl2sql_rl.config import load_project_config
 from nl2sql_rl.data.audit import run_train_audit
 from nl2sql_rl.data.bird import build_train_inventory
 from nl2sql_rl.data.dev import download_dev500, run_dev_audit
 from nl2sql_rl.data.split import build_splits_and_leakage_report
-from nl2sql_rl.io_utils import write_json
+from nl2sql_rl.io_utils import read_jsonl, sha256_file, write_json
+from nl2sql_rl.models import AgentAction, EpisodeResult, HiddenAnswer, TaskView
 
 app = typer.Typer(help="BIRD SQLite Agentic NL2SQL post-training toolkit.")
 data_app = typer.Typer(help="Build and audit BIRD data.")
@@ -142,3 +145,76 @@ def data_split(
         loaded.paths.output_root, manifest_root, seed=loaded.seed
     )
     typer.echo(json.dumps({"split": manifest, "leakage": leakage}, indent=2, sort_keys=True))
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise typer.BadParameter(f"文件必须包含 JSON 对象：{path}")
+    return value
+
+
+@agent_app.command("run")
+def agent_run(
+    task_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answer_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    database: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    actions: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/episodes/episode.json"
+    ),
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/project.yaml"
+    ),
+) -> None:
+    """使用预先生成的 Action JSONL 运行一个 CPU episode。"""
+    loaded = load_project_config(config)
+    task = TaskView.model_validate(_read_json_object(task_path))
+    answer = HiddenAnswer.model_validate(_read_json_object(answer_path))
+    action_rows = read_jsonl(actions)
+    policy = ScriptedPolicy([AgentAction.model_validate(row) for row in action_rows])
+    episode = run_episode(
+        task,
+        answer,
+        database,
+        policy,
+        runtime=loaded.runtime,
+        config_hash=sha256_file(config),
+    )
+    write_json(output, episode.model_dump(mode="json"))
+    typer.echo(json.dumps(episode.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@agent_app.command("replay")
+def agent_replay(
+    episode_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    task_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answer_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    database: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/project.yaml"
+    ),
+) -> None:
+    """在同一数据库上重新执行 episode 中的规范化 Action。"""
+    loaded = load_project_config(config)
+    episode = EpisodeResult.model_validate(_read_json_object(episode_path))
+    task = TaskView.model_validate(_read_json_object(task_path))
+    answer = HiddenAnswer.model_validate(_read_json_object(answer_path))
+    comparison = replay_episode(
+        episode,
+        task,
+        answer,
+        database,
+        runtime=loaded.runtime,
+    )
+    payload = {
+        "terminal_matches": comparison.terminal_matches,
+        "submitted_sql_matches": comparison.submitted_sql_matches,
+        "reward_matches": comparison.reward_matches,
+        "exact_terminal_outcome": comparison.exact_terminal_outcome,
+        "reproduced": comparison.reproduced.model_dump(mode="json"),
+    }
+    if output is not None:
+        write_json(output, payload)
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))

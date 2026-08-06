@@ -1,4 +1,4 @@
-"""Read-only SQLite execution primitives shared by cleaning, harness, and evaluation."""
+"""清洗、Agent 与评测共享的只读 SQLite 执行原语。"""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ _DENIED_AUTHORIZER_ACTIONS = {
 
 
 class UnsafeSQLError(ValueError):
-    """Raised before execution when SQL is not a single read-only query."""
+    """SQL 不是单条只读查询时，在执行前抛出。"""
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,8 @@ class QueryExecution:
     empty_result: bool
     result_too_large: bool
     error: str | None = None
+    columns: tuple[str, ...] = ()
+    preview_rows: tuple[str, ...] = ()
 
 
 def validate_read_only_sql(sql: str) -> None:
@@ -179,6 +181,7 @@ def execute_read_only(
     timeout_seconds: float,
     max_rows: int = 100_000,
     max_result_bytes: int = 64 * 1024 * 1024,
+    preview_limit: int = 0,
 ) -> QueryExecution:
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -227,7 +230,9 @@ def execute_read_only(
 
         connection.set_progress_handler(progress, 1_000)
         cursor = connection.execute(sql)
+        columns = tuple(str(item[0]) for item in (cursor.description or ()))
         canonical_rows: set[str] = set()
+        preview: list[str] = []
         row_count = 0
         result_bytes = 0
         too_large = False
@@ -237,6 +242,8 @@ def execute_read_only(
                 row_count += 1
                 result_bytes += len(row.encode("utf-8"))
                 canonical_rows.add(row)
+                if len(preview) < preview_limit:
+                    preview.append(row)
                 if row_count > max_rows or result_bytes > max_result_bytes:
                     too_large = True
                     break
@@ -252,6 +259,8 @@ def execute_read_only(
             elapsed_ms=elapsed,
             empty_result=row_count == 0,
             result_too_large=too_large,
+            columns=columns,
+            preview_rows=tuple(preview),
         )
     except sqlite3.Error as exc:
         status = classify_sqlite_error(str(exc), deadline_hit=deadline_hit)
@@ -266,7 +275,7 @@ def execute_read_only(
             result_too_large=False,
             error=str(exc)[:500],
         )
-    except Exception as exc:  # defensive boundary around native SQLite calls
+    except Exception as exc:  # SQLite 原生调用的最后一道防御边界
         return QueryExecution(
             status=AuditStatus.INFRASTRUCTURE_ERROR,
             digest=None,
