@@ -25,6 +25,7 @@ nl2sql-rl = "nl2sql_rl.cli:app"
 [dependency-groups]
 dev = [
   "build>=1.2,<2",
+  "hatchling>=1.27,<2",
   "mypy>=1.17,<2",
   "pytest>=8.4,<10",
   "pytest-asyncio>=1.1,<2",

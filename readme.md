@@ -23,3 +23,23 @@ UV_CACHE_DIR=/tmp/nl2sql-rl-uv-cache uv run pytest -m "not full_data and not net
 ```
 
 要求 Python 3.11。完整数据、Harness、训练和评测命令会随对应阶段补充。
+
+## Train Gold SQL 审计
+
+现有 BIRD train 保持原样，`train.json` 是 SQL 主来源，`train_gold.sql` 用于逐行交叉校验：
+
+```bash
+UV_CACHE_DIR=/tmp/nl2sql-rl-uv-cache uv run nl2sql-rl data inventory
+UV_CACHE_DIR=/tmp/nl2sql-rl-uv-cache uv run nl2sql-rl data clean-train --resume
+UV_CACHE_DIR=/tmp/nl2sql-rl-uv-cache uv run pytest -m full_data
+```
+
+当前固定来源包含 9,428 条任务和 69 个 SQLite 数据库。10 秒只读双执行审计得到：
+
+- 8,905 条可执行且结果稳定；
+- 350 条缺表或缺列，173 条超时；
+- 可执行项中 271 条为空结果、49 条结果超过限制；
+- 最终 8,585 条进入 `train_rl_clean`。
+
+完整 Actor task 和隐藏 answer 位于本地 `outputs/data/train/`，Git 只保存不含问题与 Gold
+SQL 的审计清单。审计前后 69 个数据库的 SHA256 全部一致。

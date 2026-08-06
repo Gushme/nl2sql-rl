@@ -1,0 +1,21 @@
+{
+  "auditor_version": "1",
+  "database_hashes_unchanged": true,
+  "dataset": "bird_train",
+  "empty_result_count": 271,
+  "executable_count": 8905,
+  "input_count": 9428,
+  "max_result_bytes": 67108864,
+  "max_rows": 100000,
+  "max_workers": 4,
+  "result_too_large_count": 49,
+  "rl_clean_count": 8585,
+  "schema_version": 1,
+  "source_inventory_sha256": "a16f8b0d00d9d667ad764e3b43b004c3904281ba748c010b116cf193f92a2890",
+  "status_counts": {
+    "missing_table_or_column": 350,
+    "passed": 8905,
+    "timeout": 173
+  },
+  "timeout_seconds": 10.0
+}
