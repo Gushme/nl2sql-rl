@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Annotated
@@ -28,6 +30,9 @@ from nl2sql_rl.models import (
     HiddenAnswer,
     TaskView,
 )
+from nl2sql_rl.teacher.client import LLMClient, LLMClientConfig
+from nl2sql_rl.teacher.collector import CollectorConfig, TeacherAttempt, collect_trajectories
+from nl2sql_rl.training.sft_data import build_sft_conversations
 
 app = typer.Typer(help="BIRD SQLite Agentic NL2SQL post-training toolkit.")
 data_app = typer.Typer(help="Build and audit BIRD data.")
@@ -326,3 +331,111 @@ def eval_report(
     )
     write_report(output, content)
     typer.echo(json.dumps({"records": len(record_rows), "output": str(output)}, indent=2))
+
+
+@teacher_app.command("collect")
+def teacher_collect(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answers: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    db_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    endpoint: Annotated[str, typer.Option()],
+    model: Annotated[str, typer.Option()],
+    cost_limit_usd: Annotated[float, typer.Option(min=0.000001)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/attempts.jsonl"
+    ),
+    summary_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/summary.json"
+    ),
+    api_key_env: Annotated[str, typer.Option()] = "TEACHER_API_KEY",
+    confirm_real_api: Annotated[bool, typer.Option("--confirm-real-api")] = False,
+    real_api: Annotated[bool, typer.Option("--real-api/--mock-api")] = True,
+    target_total: Annotated[int, typer.Option(min=1)] = 1_000,
+    train_quota: Annotated[int, typer.Option(min=0)] = 900,
+    validation_quota: Annotated[int, typer.Option(min=0)] = 100,
+    max_attempts: Annotated[int, typer.Option(min=1)] = 1_500,
+    concurrency: Annotated[int, typer.Option(min=1, max=32)] = 4,
+    input_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
+    output_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
+    max_request_cost_usd: Annotated[float, typer.Option(min=0.000001)] = 1.0,
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/project.yaml"
+    ),
+) -> None:
+    """采集合格 Teacher 轨迹；真实 API 需要费用上限和显式确认。"""
+    project = load_project_config(config)
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        raise typer.BadParameter(f"环境变量 {api_key_env} 未设置")
+    task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
+    answer_rows = [HiddenAnswer.model_validate(row) for row in read_jsonl(answers)]
+    client_config = LLMClientConfig(
+        endpoint=endpoint,
+        model=model,
+        concurrency=concurrency,
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
+        max_request_cost_usd=max_request_cost_usd,
+        real_api=real_api,
+    )
+    collector_config = CollectorConfig(
+        target_total=target_total,
+        train_quota=train_quota,
+        validation_quota=validation_quota,
+        max_attempts=max_attempts,
+        concurrency=concurrency,
+        confirm_real_api=confirm_real_api,
+    )
+
+    async def run() -> dict[str, object]:
+        async with LLMClient(
+            client_config,
+            api_key=api_key,
+            cost_limit_usd=cost_limit_usd,
+        ) as client:
+            return await collect_trajectories(
+                task_rows,
+                answer_rows,
+                db_root,
+                output,
+                client,
+                runtime=project.runtime,
+                config=collector_config,
+            )
+
+    summary = asyncio.run(run())
+    write_json(summary_output, summary)
+    typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+
+
+@teacher_app.command("build-sft")
+def teacher_build_sft(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    attempts: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    train_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/sft/train.jsonl"
+    ),
+    validation_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/sft/validation.jsonl"
+    ),
+) -> None:
+    """只从 EX 正确且协议安全的轨迹构建无 Gold 泄漏 SFT 对话。"""
+    task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
+    attempt_rows = [TeacherAttempt.model_validate(row) for row in read_jsonl(attempts)]
+    conversations = build_sft_conversations(task_rows, attempt_rows)
+    train_rows = [
+        row.model_dump(mode="json") for row in conversations if row.split == "train"
+    ]
+    validation_rows = [
+        row.model_dump(mode="json")
+        for row in conversations
+        if row.split == "validation"
+    ]
+    write_jsonl(train_output, train_rows)
+    write_jsonl(validation_output, validation_rows)
+    typer.echo(
+        json.dumps(
+            {"train": len(train_rows), "validation": len(validation_rows)},
+            indent=2,
+        )
+    )
