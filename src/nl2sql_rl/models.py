@@ -104,9 +104,13 @@ class EpisodeResult(StrictRecord):
 class EvaluationRecord(StrictRecord):
     schema_version: int = 1
     task_id: str
+    db_id: str | None = None
     prediction_sql: str | None
     ex: float | None = None
     soft_f1: float | None = None
     r_ves: float | None = None
+    prediction_status: str | None = None
+    gold_status: str | None = None
     error_type: str | None = None
     infrastructure_status: str = "ok"
+    details: dict[str, Any] = Field(default_factory=dict)

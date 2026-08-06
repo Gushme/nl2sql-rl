@@ -158,7 +158,7 @@ def classify_sqlite_error(message: str, *, deadline_hit: bool = False) -> AuditS
     return AuditStatus.SQLITE_ERROR
 
 
-def _authorizer(
+def readonly_authorizer(
     action: int,
     argument_1: str | None,
     argument_2: str | None,
@@ -219,7 +219,7 @@ def execute_read_only(
         connection = sqlite3.connect(uri, uri=True, timeout=1.0)
         connection.enable_load_extension(False)
         connection.execute("PRAGMA query_only = ON")
-        connection.set_authorizer(_authorizer)
+        connection.set_authorizer(readonly_authorizer)
 
         def progress() -> int:
             nonlocal deadline_hit

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Annotated
 
@@ -16,8 +17,17 @@ from nl2sql_rl.data.audit import run_train_audit
 from nl2sql_rl.data.bird import build_train_inventory
 from nl2sql_rl.data.dev import download_dev500, run_dev_audit
 from nl2sql_rl.data.split import build_splits_and_leakage_report
-from nl2sql_rl.io_utils import read_jsonl, sha256_file, write_json
-from nl2sql_rl.models import AgentAction, EpisodeResult, HiddenAnswer, TaskView
+from nl2sql_rl.eval.judge import blind_prompt, build_blind_payload
+from nl2sql_rl.eval.pipeline import PredictionRecord, score_dataset
+from nl2sql_rl.eval.report import render_report, write_report
+from nl2sql_rl.io_utils import read_jsonl, sha256_file, write_json, write_jsonl
+from nl2sql_rl.models import (
+    AgentAction,
+    EpisodeResult,
+    EvaluationRecord,
+    HiddenAnswer,
+    TaskView,
+)
 
 app = typer.Typer(help="BIRD SQLite Agentic NL2SQL post-training toolkit.")
 data_app = typer.Typer(help="Build and audit BIRD data.")
@@ -218,3 +228,101 @@ def agent_replay(
     if output is not None:
         write_json(output, payload)
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@eval_app.command("score")
+def eval_score(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answers: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    predictions: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    db_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/records.jsonl"
+    ),
+    summary_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/summary.json"
+    ),
+    timeout_seconds: Annotated[float, typer.Option(min=0.01)] = 10.0,
+    rves_iterations: Annotated[int, typer.Option(min=0)] = 0,
+    official_count: Annotated[int, typer.Option(min=1)] = 500,
+) -> None:
+    """用只读 SQL 执行器计算 EX、Soft-F1 和可选 R-VES。"""
+    task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
+    answer_rows = [HiddenAnswer.model_validate(row) for row in read_jsonl(answers)]
+    prediction_rows = [
+        PredictionRecord.model_validate(row) for row in read_jsonl(predictions)
+    ]
+    records, summary = score_dataset(
+        task_rows,
+        answer_rows,
+        prediction_rows,
+        db_root,
+        timeout_seconds=timeout_seconds,
+        rves_iterations=rves_iterations,
+        official_count=official_count,
+    )
+    write_jsonl(output, [record.model_dump(mode="json") for record in records])
+    write_json(summary_output, summary)
+    typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+
+
+@eval_app.command("judge")
+def eval_judge(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    episodes: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/blind_judge_inputs.jsonl"
+    ),
+) -> None:
+    """生成不含 Gold、Reward、EX 和模型名的盲评输入，不调用真实 API。"""
+    task_by_id = {
+        task.task_id: task
+        for task in (TaskView.model_validate(row) for row in read_jsonl(tasks))
+    }
+    episode_rows = [EpisodeResult.model_validate(row) for row in read_jsonl(episodes)]
+    payloads = []
+    for episode in episode_rows:
+        task = task_by_id.get(episode.task_id)
+        if task is None:
+            raise typer.BadParameter(f"缺少 TaskView：{episode.task_id}")
+        payloads.append(
+            {
+                "task_id": episode.task_id,
+                "payload": build_blind_payload(task, episode),
+                "prompt": blind_prompt(task, episode),
+            }
+        )
+    write_jsonl(output, payloads)
+    typer.echo(json.dumps({"count": len(payloads), "output": str(output)}, indent=2))
+
+
+@eval_app.command("report")
+def eval_report(
+    records: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/report.md"
+    ),
+    episodes: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+    official_count: Annotated[int, typer.Option(min=1)] = 500,
+) -> None:
+    """汇总确定性指标、错误分布、行为指标和复现信息。"""
+    record_rows = [EvaluationRecord.model_validate(row) for row in read_jsonl(records)]
+    episode_rows = (
+        [EpisodeResult.model_validate(row) for row in read_jsonl(episodes)]
+        if episodes is not None
+        else None
+    )
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_sha = "unknown"
+    content = render_report(
+        record_rows,
+        episode_rows,
+        official_count=official_count,
+        project_git_sha=git_sha,
+    )
+    write_report(output, content)
+    typer.echo(json.dumps({"records": len(record_rows), "output": str(output)}, indent=2))
