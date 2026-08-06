@@ -100,6 +100,9 @@ def tokenize_action_only(
     for index, message in enumerate(conversation.messages):
         role = str(message["role"])
         content = str(message["content"])
+        if role == "tool":
+            role = "user"
+            content = f"<tool_response>\n{content}\n</tool_response>"
         prefix = tokenizer.encode(f"<|im_start|>{role}\n", add_special_tokens=False)
         content_ids = tokenizer.encode(content, add_special_tokens=False)
         suffix = tokenizer.encode("<|im_end|>\n", add_special_tokens=False)

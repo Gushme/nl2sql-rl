@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -19,9 +19,11 @@ from nl2sql_rl.data.audit import run_train_audit
 from nl2sql_rl.data.bird import build_train_inventory
 from nl2sql_rl.data.dev import download_dev500, run_dev_audit
 from nl2sql_rl.data.split import build_splits_and_leakage_report
+from nl2sql_rl.e2e import run_cpu_e2e
+from nl2sql_rl.eval.inference import InferenceRecord, collect_inference_episodes
 from nl2sql_rl.eval.judge import blind_prompt, build_blind_payload
 from nl2sql_rl.eval.pipeline import PredictionRecord, score_dataset
-from nl2sql_rl.eval.report import render_report, write_report
+from nl2sql_rl.eval.report import render_comparison_report, render_report, write_report
 from nl2sql_rl.io_utils import read_jsonl, sha256_file, write_json, write_jsonl
 from nl2sql_rl.models import (
     AgentAction,
@@ -66,6 +68,20 @@ app.add_typer(eval_app, name="eval")
 def version() -> None:
     """Print the package version."""
     typer.echo(__version__)
+
+
+@app.command("cpu-e2e")
+def cpu_e2e(
+    output: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "outputs/cpu_e2e/run"
+    ),
+    agent_loop_config: Annotated[
+        Path, typer.Option(exists=True, dir_okay=False)
+    ] = Path("configs/verl_agent_loop.yaml"),
+) -> None:
+    """运行不含 GPU、模型推理和外部 API 的端到端交付演练。"""
+    report = run_cpu_e2e(output, agent_loop_config=agent_loop_config)
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
 
 
 @app.command("show-config")
@@ -322,6 +338,7 @@ def eval_report(
         "outputs/evaluation/report.md"
     ),
     episodes: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+    inference_summary: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
     official_count: Annotated[int, typer.Option(min=1)] = 500,
 ) -> None:
     """汇总确定性指标、错误分布、行为指标和复现信息。"""
@@ -342,9 +359,155 @@ def eval_report(
         episode_rows,
         official_count=official_count,
         project_git_sha=git_sha,
+        inference_manifest=(
+            _read_json_object(inference_summary) if inference_summary is not None else None
+        ),
     )
     write_report(output, content)
     typer.echo(json.dumps({"records": len(record_rows), "output": str(output)}, indent=2))
+
+
+@eval_app.command("rollout")
+def eval_rollout(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answers: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    db_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    endpoint: Annotated[str, typer.Option()],
+    model: Annotated[str, typer.Option()],
+    model_label: Annotated[str, typer.Option()],
+    cost_limit_usd: Annotated[float, typer.Option(min=0.000001)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/inference.jsonl"
+    ),
+    predictions_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/predictions.jsonl"
+    ),
+    episodes_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/episodes.jsonl"
+    ),
+    summary_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/inference_summary.json"
+    ),
+    api_key_env: Annotated[str, typer.Option()] = "INFERENCE_API_KEY",
+    confirm_real_api: Annotated[bool, typer.Option("--confirm-real-api")] = False,
+    real_api: Annotated[bool, typer.Option("--real-api/--local-api")] = True,
+    concurrency: Annotated[int, typer.Option(min=1, max=32)] = 4,
+    temperature: Annotated[float, typer.Option(min=0)] = 0.0,
+    input_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
+    output_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
+    max_request_cost_usd: Annotated[float, typer.Option(min=0.000001)] = 0.001,
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/project.yaml"
+    ),
+) -> None:
+    """用同一 harness 和 OpenAI-compatible backend 采集完整评测轨迹。"""
+    project = load_project_config(config)
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        raise typer.BadParameter(f"环境变量 {api_key_env} 未设置")
+    task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
+    answer_rows = [HiddenAnswer.model_validate(row) for row in read_jsonl(answers)]
+    client_config = LLMClientConfig(
+        endpoint=endpoint,
+        model=model,
+        concurrency=concurrency,
+        max_completion_tokens=project.runtime.max_action_tokens,
+        temperature=temperature,
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
+        max_request_cost_usd=max_request_cost_usd,
+        real_api=real_api,
+    )
+
+    async def run() -> tuple[list[InferenceRecord], dict[str, Any]]:
+        async with LLMClient(
+            client_config,
+            api_key=api_key,
+            cost_limit_usd=cost_limit_usd,
+        ) as client:
+            records, summary = await collect_inference_episodes(
+                task_rows,
+                answer_rows,
+                db_root,
+                output,
+                client,
+                runtime=project.runtime,
+                model_label=model_label,
+                concurrency=concurrency,
+                confirm_real_api=confirm_real_api,
+            )
+            return records, summary
+
+    records, summary = asyncio.run(run())
+    write_jsonl(
+        predictions_output,
+        [
+            {
+                "task_id": record.task_id,
+                "prediction_sql": record.episode.submitted_sql,
+                "usage": record.episode.usage,
+            }
+            for record in records
+        ],
+    )
+    write_jsonl(
+        episodes_output,
+        [record.episode.model_dump(mode="json") for record in records],
+    )
+    write_json(summary_output, summary)
+    typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+
+
+@eval_app.command("compare")
+def eval_compare(
+    base_records: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    sft_records: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    grpo_records: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    base_inference: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    sft_inference: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    grpo_inference: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/evaluation/comparison.md"
+    ),
+    official_count: Annotated[int, typer.Option(min=1)] = 500,
+) -> None:
+    """校验任务与推理条件一致后生成 Base/SFT/GRPO 对比报告。"""
+    record_paths = {
+        "base": base_records,
+        "sft": sft_records,
+        "grpo": grpo_records,
+    }
+    inference_paths = {
+        "base": base_inference,
+        "sft": sft_inference,
+        "grpo": grpo_inference,
+    }
+    runs = {
+        label: [EvaluationRecord.model_validate(row) for row in read_jsonl(path)]
+        for label, path in record_paths.items()
+    }
+    inference_manifests = {
+        label: _read_json_object(path) for label, path in inference_paths.items()
+    }
+    conditions = {
+        label: str(manifest.get("comparison_condition_hash", ""))
+        for label, manifest in inference_manifests.items()
+    }
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_sha = "unknown"
+    content = render_comparison_report(
+        runs,
+        conditions,
+        official_count=official_count,
+        project_git_sha=git_sha,
+        inference_manifests=inference_manifests,
+    )
+    write_report(output, content)
+    typer.echo(json.dumps({"output": str(output), "final_n": len(runs["base"])}, indent=2))
 
 
 @teacher_app.command("collect")

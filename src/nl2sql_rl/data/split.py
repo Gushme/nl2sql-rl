@@ -123,6 +123,14 @@ def build_splits_and_leakage_report(
     write_jsonl(split_root / "tasks" / "validation.jsonl", split_validation)
     write_jsonl(split_root / "answers" / "train.jsonl", answers_by_split["train"])
     write_jsonl(split_root / "answers" / "validation.jsonl", answers_by_split["validation"])
+    write_jsonl(
+        split_root / "tasks" / "teacher_pool.jsonl",
+        [*split_train, *split_validation],
+    )
+    write_jsonl(
+        split_root / "answers" / "teacher_pool.jsonl",
+        [*answers_by_split["train"], *answers_by_split["validation"]],
+    )
 
     train_inventory = json.loads(
         (manifest_root / "train_inventory.json").read_text(encoding="utf-8")

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
 import pytest
 
-from nl2sql_rl.teacher.client import CostLimitExceeded, LLMClient, LLMClientConfig
+from nl2sql_rl.teacher.client import (
+    CostLimitExceeded,
+    LLMClient,
+    LLMClientConfig,
+    api_compatible_messages,
+)
 
 
 def _response(
@@ -61,6 +67,8 @@ async def test_client_normalizes_native_tool_call_and_text_json() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        assert request.read()
+        assert json.loads(request.content)["seed"] == 42
         if calls == 1:
             return _response(request, tool_call=True)
         return _response(
@@ -149,3 +157,21 @@ async def test_cost_cap_blocks_request_before_external_call() -> None:
         with pytest.raises(CostLimitExceeded):
             await client.complete_action([])
     assert calls == 0
+
+
+def test_internal_tool_observation_becomes_qwen_compatible_user_message() -> None:
+    converted = api_compatible_messages(
+        [
+            {"role": "assistant", "content": '{"action":"list_tables"}'},
+            {
+                "role": "tool",
+                "name": "list_tables",
+                "event_id": "event_1",
+                "content": '{"ok":true}',
+            },
+        ]
+    )
+    assert converted[1] == {
+        "role": "user",
+        "content": '<tool_response>\n{"ok":true}\n</tool_response>',
+    }

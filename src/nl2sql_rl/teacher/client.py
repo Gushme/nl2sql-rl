@@ -88,6 +88,7 @@ class LLMClientConfig(StrictRecord):
     timeout_seconds: float = Field(default=60.0, gt=0)
     max_completion_tokens: int = Field(default=512, ge=1)
     temperature: float = Field(default=0.0, ge=0)
+    seed: int = 42
     input_price_per_million: float = Field(default=0.0, ge=0)
     output_price_per_million: float = Field(default=0.0, ge=0)
     max_request_cost_usd: float = Field(default=1.0, gt=0)
@@ -146,6 +147,24 @@ class CostLedger:
     async def release(self) -> None:
         async with self._lock:
             self.reserved_usd = max(0.0, self.reserved_usd - self.reservation_usd)
+
+
+def api_compatible_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """把内部 tool observation 转为无需 tool_call_id 的 Qwen user 消息。"""
+    converted: list[dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        content = str(message.get("content", ""))
+        if role == "tool":
+            converted.append(
+                {
+                    "role": "user",
+                    "content": f"<tool_response>\n{content}\n</tool_response>",
+                }
+            )
+        else:
+            converted.append({"role": role, "content": content})
+    return converted
 
 
 def _normalize_choice(message: dict[str, Any]) -> AgentAction:
@@ -230,10 +249,11 @@ class LLMClient:
             async with self._semaphore:
                 payload = {
                     "model": self.config.model,
-                    "messages": messages,
+                    "messages": api_compatible_messages(messages),
                     "tools": ACTION_TOOLS,
                     "tool_choice": "auto",
                     "temperature": self.config.temperature,
+                    "seed": self.config.seed,
                     "max_tokens": max_tokens or self.config.max_completion_tokens,
                 }
                 response: httpx.Response | None = None

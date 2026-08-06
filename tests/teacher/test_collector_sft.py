@@ -137,6 +137,9 @@ async def test_collector_resumes_without_duplicate_requests_and_builds_sft(
     ]
     assert [label for label in tokenized.labels if label != -100] == expected
     assert len(tokenized.input_ids) == len(tokenized.labels) == len(tokenized.attention_mask)
+    rendered = "".join(chr(token_id) for token_id in tokenized.input_ids)
+    assert "<|im_start|>user\n<tool_response>" in rendered
+    assert "<|im_start|>tool" not in rendered
 
 
 @pytest.mark.asyncio

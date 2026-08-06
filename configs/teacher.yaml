@@ -7,6 +7,7 @@ retry_base_seconds: 0.5
 timeout_seconds: 60.0
 max_completion_tokens: 512
 temperature: 0.0
+seed: 42
 input_price_per_million: 0.0
 output_price_per_million: 0.0
 max_request_cost_usd: 1.0
