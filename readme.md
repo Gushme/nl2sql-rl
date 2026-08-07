@@ -40,6 +40,48 @@ uv run nl2sql-rl cpu-e2e --output outputs/cpu_e2e/run
 
 报告写入 `outputs/cpu_e2e/run/report.json`。该结果只证明管线连通，不代表 BIRD 模型指标。
 
+## Makefile 快速入口
+
+根目录 Makefile 是现有 CLI 的薄编排层，兼容 macOS 自带的 GNU Make 3.81。默认只显示帮助，不存在会自动调用 API 或启动 GPU 训练的 `make all`：
+
+```bash
+make
+make setup
+make check
+make test-full
+make data-all
+make cpu-e2e E2E_OUTPUT=outputs/cpu_e2e/manual-run
+make pipeline-cpu
+```
+
+`data-all` 和 `pipeline-cpu` 要求本地已经存在 `train/` 与 `dev500/raw/minidev`。路径可通过 `DEV_PACKAGE_ROOT`、`E2E_OUTPUT`、`PROJECT_CONFIG` 等 Make 变量覆盖。
+
+真实 Teacher API 和 GPU 操作必须显式设置 `CONFIRM=1`；Teacher 还要求费用上限，API key 只从环境变量读取且不会出现在命令行：
+
+```bash
+export TEACHER_API_KEY=...
+CONFIRM=1 \
+TEACHER_ENDPOINT=https://provider.example/v1 \
+TEACHER_MODEL=teacher-model \
+TEACHER_COST_LIMIT_USD=20 \
+make teacher-collect
+
+CONFIRM=1 make sft-run
+CONFIRM=1 make sft-export
+CONFIRM=1 make grpo-run
+```
+
+评测目标固定使用本地 OpenAI-compatible backend；真实外部评测 API 仍应直接使用 CLI 的 `--real-api --confirm-real-api`：
+
+```bash
+INFERENCE_API_KEY=local \
+INFERENCE_ENDPOINT=http://127.0.0.1:8000/v1 \
+BASE_MODEL_NAME=qwen-base \
+make eval-base
+```
+
+完整参数和底层命令仍以 `uv run nl2sql-rl --help` 及下文 CLI 示例为准。
+
 ## 2. 数据准备与 Gold 清洗
 
 原始目录永远保持只读并被 Git 忽略：
