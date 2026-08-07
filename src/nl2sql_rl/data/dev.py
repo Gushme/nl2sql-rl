@@ -31,6 +31,7 @@ from nl2sql_rl.models import AuditStatus, HiddenAnswer, TaskView
 EXPECTED_DEV_ROWS = 500
 EXPECTED_DEV_DATABASES = 11
 HF_REVISION = "f65faf4"
+HF_ANNOTATION_SHA256 = "88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2"
 HF_ANNOTATION_URL = (
     "https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/"
     f"{HF_REVISION}/data/mini_dev_sqlite-00000-of-00001.json"
@@ -240,7 +241,12 @@ def _extract_archive(archive: Path, destination: Path, *, force: bool) -> None:
     marker.write_text("ok\n", encoding="utf-8")
 
 
-def _select_database_sources(extracted: Path, expected_db_ids: set[str]) -> dict[str, Path]:
+def _select_database_sources(
+    extracted: Path,
+    expected_db_ids: set[str],
+    *,
+    require_unique: bool = False,
+) -> dict[str, Path]:
     candidates: dict[str, list[Path]] = {db_id: [] for db_id in expected_db_ids}
     for path in extracted.rglob("*.sqlite"):
         if path.stem in candidates:
@@ -249,6 +255,8 @@ def _select_database_sources(extracted: Path, expected_db_ids: set[str]) -> dict
     for db_id, paths in candidates.items():
         if not paths:
             raise FileNotFoundError(f"完整包缺少数据库：{db_id}")
+        if require_unique and len(paths) != 1:
+            raise ValueError(f"本地完整包中的数据库 {db_id} 必须唯一，实际为 {len(paths)} 个")
         ranked = sorted(
             paths,
             key=lambda path: ("dev_databases" not in path.parts, len(path.parts)),
@@ -278,23 +286,91 @@ def _find_gold_file(extracted: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def _find_package_annotation(extracted: Path) -> Path:
+    matches = sorted(extracted.rglob("mini_dev_sqlite.json"), key=lambda path: len(path.parts))
+    if len(matches) != 1:
+        raise ValueError(f"本地完整包必须恰好包含一个 SQLite annotation，实际为 {len(matches)} 个")
+    return matches[0]
+
+
+def _validate_canonical_annotation(path: Path) -> list[dict[str, Any]]:
+    rows = _load_annotation(path)
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != HF_ANNOTATION_SHA256:
+        raise ValueError(
+            "Mini-Dev annotation SHA256 与固定 HF revision 不一致："
+            f"{actual_sha256} != {HF_ANNOTATION_SHA256}"
+        )
+    return rows
+
+
+def _cross_check_package_annotation(
+    rows: list[dict[str, Any]], annotation_path: Path
+) -> dict[str, Any]:
+    """校验包内元数据；SQL 差异只记录，不覆盖固定 HF Gold。"""
+    package_rows = _load_annotation(annotation_path)
+    canonical_by_id = {str(row["question_id"]): row for row in rows}
+    package_by_id = {str(row["question_id"]): row for row in package_rows}
+    if set(canonical_by_id) != set(package_by_id):
+        raise ValueError("本地完整包与固定 annotation 的 question_id 集合不一致")
+    metadata_fields = ("db_id", "question", "evidence", "difficulty")
+    metadata_mismatches: list[str] = []
+    sql_mismatches: list[str] = []
+    for question_id in sorted(canonical_by_id):
+        canonical = canonical_by_id[question_id]
+        package = package_by_id[question_id]
+        if any(canonical[field] != package[field] for field in metadata_fields):
+            metadata_mismatches.append(question_id)
+        if str(canonical["SQL"]).strip() != str(package["SQL"]).strip():
+            sql_mismatches.append(question_id)
+    if metadata_mismatches:
+        raise ValueError(
+            "本地完整包与固定 annotation 存在非 SQL 元数据差异："
+            f"{metadata_mismatches[:10]}"
+        )
+    return {
+        "present": True,
+        "sha256": sha256_file(annotation_path),
+        "row_count": len(package_rows),
+        "metadata_mismatch_count": 0,
+        "sql_mismatch_count": len(sql_mismatches),
+        "sql_mismatch_question_ids": sql_mismatches,
+        "authoritative_gold": "fixed_hf_annotation",
+    }
+
+
 def _cross_check_gold(rows: list[dict[str, Any]], gold_path: Path | None) -> dict[str, Any]:
     if gold_path is None:
         return {"present": False, "mismatch_count": None}
     lines = gold_path.read_text(encoding="utf-8").splitlines()
     if len(lines) != len(rows):
         raise ValueError(f"完整包 Gold 行数与 annotation 不同：{len(lines)} != {len(rows)}")
-    mismatches = 0
+    mismatches: list[str] = []
     for row, line in zip(rows, lines, strict=True):
-        if "\t" not in line:
-            mismatches += 1
-            continue
-        sql, db_id = line.rsplit("\t", maxsplit=1)
-        if sql.strip() != str(row["SQL"]).strip() or db_id.strip() != str(row["db_id"]):
-            mismatches += 1
-    if mismatches:
-        raise ValueError(f"HF annotation 与完整包 Gold 有 {mismatches} 条不一致")
-    return {"present": True, "mismatch_count": 0, "sha256": sha256_file(gold_path)}
+        db_id = str(row["db_id"])
+        stripped = line.rstrip()
+        if not stripped.endswith(db_id):
+            raise ValueError(f"完整包 Gold 的数据库标识不匹配：question_id={row['question_id']}")
+        sql_with_separator = stripped[: -len(db_id)]
+        if not sql_with_separator or not sql_with_separator[-1].isspace():
+            raise ValueError(f"完整包 Gold 缺少 SQL/数据库分隔符：question_id={row['question_id']}")
+        sql = sql_with_separator.rstrip()
+        if sql != str(row["SQL"]).strip():
+            mismatches.append(str(row["question_id"]))
+    return {
+        "present": True,
+        "mismatch_count": len(mismatches),
+        "mismatch_question_ids": mismatches,
+        "sha256": sha256_file(gold_path),
+        "authoritative_gold": "fixed_hf_annotation",
+    }
+
+
+def _local_manifest_path(path: Path, dev_root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(dev_root.resolve()))
+    except ValueError:
+        return f"external/{path.name}"
 
 
 def download_dev500(
@@ -302,11 +378,22 @@ def download_dev500(
     *,
     force: bool = False,
     database_source: str = "mirror",
+    local_package_root: Path | None = None,
 ) -> dict[str, Any]:
     raw_root = dev_root / "raw"
     annotation_path = dev_root / "mini_dev_sqlite.json"
-    _download_http(HF_ANNOTATION_URL, annotation_path, force=force)
-    rows = _load_annotation(annotation_path)
+    if database_source == "local":
+        if not annotation_path.is_file():
+            raise FileNotFoundError(
+                "本地导入要求 dev500/mini_dev_sqlite.json 已存在，且不会自动联网下载"
+            )
+    else:
+        _download_http(HF_ANNOTATION_URL, annotation_path, force=force)
+    rows = _validate_canonical_annotation(annotation_path)
+    package_annotation_check: dict[str, Any] = {
+        "present": False,
+        "sql_mismatch_count": None,
+    }
     if database_source == "mirror":
         databases, transport = _download_mirror_databases(rows, dev_root, force=force)
         gold_check = {"present": False, "mismatch_count": None}
@@ -331,6 +418,9 @@ def download_dev500(
         _extract_archive(archive_path, extracted, force=force)
         expected_db_ids = {str(row["db_id"]) for row in rows}
         sources = _select_database_sources(extracted, expected_db_ids)
+        package_annotation_check = _cross_check_package_annotation(
+            rows, _find_package_annotation(extracted)
+        )
         databases = {}
         for db_id, source in sorted(sources.items()):
             destination = dev_root / "dev_databases" / db_id / f"{db_id}.sqlite"
@@ -350,8 +440,53 @@ def download_dev500(
             "bytes": archive_path.stat().st_size,
             "sha256": sha256_file(archive_path),
         }
+    elif database_source == "local":
+        package_root = (local_package_root or raw_root / "minidev").resolve()
+        if not package_root.is_dir():
+            raise FileNotFoundError(f"本地 Mini-Dev 完整包目录不存在：{package_root}")
+        expected_db_ids = {str(row["db_id"]) for row in rows}
+        sources = _select_database_sources(
+            package_root,
+            expected_db_ids,
+            require_unique=True,
+        )
+        package_annotation_check = _cross_check_package_annotation(
+            rows, _find_package_annotation(package_root)
+        )
+        source_hashes = {db_id: sha256_file(source) for db_id, source in sources.items()}
+        databases = {}
+        for db_id, source in sorted(sources.items()):
+            destination = dev_root / "dev_databases" / db_id / f"{db_id}.sqlite"
+            _materialize_database(source, destination, force=force)
+            destination_sha256 = sha256_file(destination)
+            if destination_sha256 != source_hashes[db_id]:
+                raise RuntimeError(f"本地数据库物化后 SHA256 不一致：{db_id}")
+            databases[db_id] = {
+                "path": str(destination.relative_to(dev_root)),
+                "bytes": destination.stat().st_size,
+                "sha256": destination_sha256,
+                "task_count": sum(str(row["db_id"]) == db_id for row in rows),
+                "source_path": _local_manifest_path(source, dev_root),
+            }
+        after_source_hashes = {
+            db_id: sha256_file(source) for db_id, source in sources.items()
+        }
+        if after_source_hashes != source_hashes:
+            raise RuntimeError("本地 Mini-Dev 源数据库在导入期间发生变化")
+        gold_check = _cross_check_gold(rows, _find_gold_file(package_root))
+        transport = {
+            "kind": "local_complete_package",
+            "path": _local_manifest_path(package_root, dev_root),
+            "source_hashes_unchanged": True,
+        }
+        complete_package = {
+            "url": GDRIVE_URL,
+            "file_id": GDRIVE_FILE_ID,
+            "downloaded": False,
+            "local_import": True,
+        }
     else:
-        raise ValueError("database_source 只允许 mirror 或 drive")
+        raise ValueError("database_source 只允许 mirror、drive 或 local")
     report: dict[str, Any] = {
         "schema_version": 1,
         "dataset": "bird_mini_dev_sqlite_500",
@@ -370,6 +505,7 @@ def download_dev500(
             "url": OFFICIAL_REPOSITORY,
             "revision": OFFICIAL_REPOSITORY_REVISION,
         },
+        "package_annotation_cross_check": package_annotation_check,
         "gold_cross_check": gold_check,
         "difficulty_counts": dict(sorted(Counter(str(row["difficulty"]) for row in rows).items())),
         "databases": databases,

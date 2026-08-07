@@ -142,8 +142,12 @@ def data_download_dev(
     manifest_root: Annotated[Path, typer.Option(file_okay=False)] = Path("data/manifests"),
     force: Annotated[bool, typer.Option("--force/--no-force")] = False,
     database_source: Annotated[
-        str, typer.Option(help="数据库传输来源：mirror 或 drive")
+        str, typer.Option(help="数据库传输来源：mirror、drive 或 local")
     ] = "mirror",
+    local_package_root: Annotated[
+        Path,
+        typer.Option(help="local 模式下已解压的 Mini-Dev 完整包目录"),
+    ] = Path("dev500/raw/minidev"),
 ) -> None:
     """下载并校验固定版本的 BIRD Mini-Dev SQLite 500。"""
     loaded = load_project_config(config)
@@ -151,6 +155,7 @@ def data_download_dev(
         loaded.paths.dev_root,
         force=force,
         database_source=database_source,
+        local_package_root=local_package_root,
     )
     write_json(manifest_root / "dev_inventory.json", report)
     typer.echo(json.dumps(report, indent=2, sort_keys=True))
