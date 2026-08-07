@@ -17,7 +17,7 @@ SQL 执行器是 EX 和 Reward 的唯一正确性裁判。LLM Judge 只评价 Ag
 - `train_rl_clean` 为 8,585 条；
 - 审计前后数据库 SHA256 全部一致。
 
-Dev500 annotation 已固定为 500 条、11 个数据库；完整数据库包因下载过慢按约定延后。因此仓库不声称已经得到 Dev `Final-N`，也没有伪造 Base/SFT/GRPO 指标。详见 [CPU 交付状态](docs/cpu-handoff.md)。
+本机也已完成 Dev500 全量审计：固定 annotation 包含 500 条、11 个数据库，498 条通过双执行审计，2 条超时，因此实际评测口径为 `Official-500 / Final-N=498`。Train/Validation/Dev 的 DB ID、数据库 SHA、task ID、标准化问题文本及近重复检查均无交叉。Base/SFT/GRPO 模型指标尚未运行。详见 [CPU 交付状态](docs/cpu-handoff.md)。
 
 ## 1. Fresh clone
 
@@ -60,7 +60,17 @@ uv run nl2sql-rl data clean-train --resume
 uv run pytest -m full_data
 ```
 
-随后下载固定版本的 [BIRD Mini-Dev SQLite 500](https://github.com/bird-bench/mini_dev)，执行相同的只读双执行清洗，并按 `db_id` 切分：
+随后准备固定版本的 [BIRD Mini-Dev SQLite 500](https://github.com/bird-bench/mini_dev)，执行相同的只读双执行清洗，并按 `db_id` 切分。若完整包已解压到 `dev500/raw/minidev`，使用完全离线的本地导入：
+
+```bash
+uv run nl2sql-rl data download-dev \
+  --database-source local \
+  --local-package-root dev500/raw/minidev
+uv run nl2sql-rl data clean-dev --resume
+uv run nl2sql-rl data split
+```
+
+若本地尚无完整包，可从固定镜像下载：
 
 ```bash
 uv run nl2sql-rl data download-dev --database-source mirror
@@ -68,7 +78,7 @@ uv run nl2sql-rl data clean-dev --resume
 uv run nl2sql-rl data split
 ```
 
-若镜像不可用，可改用 `--database-source drive`。下载与审计支持断点；禁止把 `dev500/` 或 `outputs/` 提交到 Git。
+镜像不可用时可改用 `--database-source drive`。本地导入不会发起网络请求；下载与审计支持断点。固定 HF annotation 是唯一 Gold 来源，包内 annotation/Gold 差异只写入 provenance，不会替换 Gold。禁止把 `dev500/` 或 `outputs/` 提交到 Git。
 
 清洗产物严格分层：
 

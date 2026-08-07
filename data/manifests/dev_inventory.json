@@ -1,0 +1,135 @@
+{
+  "annotation": {
+    "bytes": 278513,
+    "revision": "f65faf4",
+    "sha256": "88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2",
+    "url": "https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/f65faf4/data/mini_dev_sqlite-00000-of-00001.json"
+  },
+  "complete_package": {
+    "downloaded": false,
+    "file_id": "13VLWIwpw5E3d5DUkMvzw7hvHE67a4XkG",
+    "local_import": true,
+    "url": "https://drive.google.com/file/d/13VLWIwpw5E3d5DUkMvzw7hvHE67a4XkG/view?usp=sharing"
+  },
+  "database_count": 11,
+  "database_source": "local",
+  "database_transport": {
+    "kind": "local_complete_package",
+    "path": "raw/minidev",
+    "source_hashes_unchanged": true
+  },
+  "databases": {
+    "california_schools": {
+      "bytes": 11116544,
+      "path": "dev_databases/california_schools/california_schools.sqlite",
+      "sha256": "c0903eec662e63068fd1d14403d3d6c1d473287fc10c4356333ea58f878db983",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/california_schools/california_schools.sqlite",
+      "task_count": 30
+    },
+    "card_games": {
+      "bytes": 261820416,
+      "path": "dev_databases/card_games/card_games.sqlite",
+      "sha256": "c98bdb57fe7474da798b407785544b9af0daaad5d61fd21e2a73309493bc1227",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/card_games/card_games.sqlite",
+      "task_count": 52
+    },
+    "codebase_community": {
+      "bytes": 481419264,
+      "path": "dev_databases/codebase_community/codebase_community.sqlite",
+      "sha256": "92101be6d2a9f6adceea59d38f6d1c556087f9eea1432432a21268cb1348036d",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/codebase_community/codebase_community.sqlite",
+      "task_count": 49
+    },
+    "debit_card_specializing": {
+      "bytes": 34635776,
+      "path": "dev_databases/debit_card_specializing/debit_card_specializing.sqlite",
+      "sha256": "b3d149ad05746dbbe5116e229e17e18f09c39db43cf117d9ef3441753608b691",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/debit_card_specializing/debit_card_specializing.sqlite",
+      "task_count": 30
+    },
+    "european_football_2": {
+      "bytes": 597754880,
+      "path": "dev_databases/european_football_2/european_football_2.sqlite",
+      "sha256": "f72f5c9b990371417288a67b27a02e601ef904d45525c2c9f7931fb01001c536",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/european_football_2/european_football_2.sqlite",
+      "task_count": 51
+    },
+    "financial": {
+      "bytes": 71294976,
+      "path": "dev_databases/financial/financial.sqlite",
+      "sha256": "d15d89cdb068a202b6f2b99342af44dffc1d52545b39ceaf62efdc0ba570101e",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/financial/financial.sqlite",
+      "task_count": 32
+    },
+    "formula_1": {
+      "bytes": 22360064,
+      "path": "dev_databases/formula_1/formula_1.sqlite",
+      "sha256": "79770caf966707e35516fa566e24b40ae515c74ec1ec4631235245645b87b24d",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/formula_1/formula_1.sqlite",
+      "task_count": 66
+    },
+    "student_club": {
+      "bytes": 2641920,
+      "path": "dev_databases/student_club/student_club.sqlite",
+      "sha256": "eb89bcfe97eefa386a27904ec5aa15159811a7eac894ec659a36e48fa9f76b77",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/student_club/student_club.sqlite",
+      "task_count": 48
+    },
+    "superhero": {
+      "bytes": 237568,
+      "path": "dev_databases/superhero/superhero.sqlite",
+      "sha256": "75e94a2c3236ee3bb2c01fb97a1c4b4c1c269bcefd4eab1d04be323d2d0825b1",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/superhero/superhero.sqlite",
+      "task_count": 52
+    },
+    "thrombosis_prediction": {
+      "bytes": 7327744,
+      "path": "dev_databases/thrombosis_prediction/thrombosis_prediction.sqlite",
+      "sha256": "87583183c3dc472fba04de702965560a9d7c0a548836613f242317e0eeb83f00",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/thrombosis_prediction/thrombosis_prediction.sqlite",
+      "task_count": 50
+    },
+    "toxicology": {
+      "bytes": 2678784,
+      "path": "dev_databases/toxicology/toxicology.sqlite",
+      "sha256": "35ef27ae6bdfda530e125ed369666ac0abb8bc8c0bcc0ad09407f547ecb61a93",
+      "source_path": "raw/minidev/MINIDEV/dev_databases/toxicology/toxicology.sqlite",
+      "task_count": 40
+    }
+  },
+  "dataset": "bird_mini_dev_sqlite_500",
+  "difficulty_counts": {
+    "challenging": 102,
+    "moderate": 250,
+    "simple": 148
+  },
+  "gold_cross_check": {
+    "authoritative_gold": "fixed_hf_annotation",
+    "mismatch_count": 4,
+    "mismatch_question_ids": [
+      "879",
+      "129",
+      "137",
+      "138"
+    ],
+    "present": true,
+    "sha256": "9089b50f2cfea1a7223f5f5019f0677bd9c6ddd61065dd00b6f0238549394976"
+  },
+  "official_repository": {
+    "revision": "b3d4bcbbae9a96934ad812551eb400c7a3b23c12",
+    "url": "https://github.com/bird-bench/mini_dev"
+  },
+  "package_annotation_cross_check": {
+    "authoritative_gold": "fixed_hf_annotation",
+    "metadata_mismatch_count": 0,
+    "present": true,
+    "row_count": 500,
+    "sha256": "def4b2b43a9b06955193418f24c9be170eb6d83763ab702311790e0cdda8c791",
+    "sql_mismatch_count": 1,
+    "sql_mismatch_question_ids": [
+      "879"
+    ]
+  },
+  "row_count": 500,
+  "schema_version": 1
+}

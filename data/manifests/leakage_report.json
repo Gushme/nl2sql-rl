@@ -1,0 +1,9 @@
+{
+  "database_sha256_overlap": [],
+  "db_id_overlap": [],
+  "exact_question_overlap": [],
+  "hard_pass": true,
+  "near_question_pairs": [],
+  "schema_version": 1,
+  "task_id_overlap": []
+}

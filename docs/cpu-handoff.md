@@ -1,6 +1,6 @@
 # CPU 交付状态
 
-更新日期：2026-08-06。
+更新日期：2026-08-08。
 
 ## 已实际完成
 
@@ -9,26 +9,24 @@
 - 审计结果：8,905 条可执行且确定，350 条缺表或缺列，173 条超时。
 - 可执行结果中 271 条为空，49 条超过 100,000 行或 64 MiB 限制；最终 `train_rl_clean` 为 8,585 条。
 - 审计前后 69 个数据库 SHA256 全部一致。
+- BIRD Mini-Dev SQLite 500 已从本地完整包离线导入，固定 HF annotation 的 SHA256 为 `88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2`。
+- Dev Gold 全量双执行结果为 498 条通过、2 条超时，无空结果或结果超限；数据库 SHA256 前后全部一致，实际口径为 `Official-500 / Final-N=498`。
+- seed 42 的内部切分为 Train 7,667、Validation 918；Train/Validation/Dev 的 DB ID、数据库 SHA、task ID、标准化问题和近重复检查均无交叉。
+- 完整包 annotation 与固定 HF annotation 有 1 条 SQL 差异，包内 Gold 文件有 4 条差异；两者只记录 provenance，固定 HF annotation 始终是唯一 Gold 来源。
 - Qwen2.5-Coder-1.5B-Instruct 固定 revision 的 tokenizer/config 已下载并校验；未下载权重。
 - CPU fixture 端到端演练已通过，覆盖只读双执行、错误后纠正、mock Teacher、统一评测 rollout、Action-only SFT、EX、SFT handoff 和 GRPO action mask。
 
-权威机器可读结果见 `data/manifests/train_audit_summary.json`、
-`data/manifests/train_inventory.json` 和 `data/manifests/qwen_tokenizer_config.json`。
+权威机器可读结果见 `data/manifests/` 下的 Train/Dev inventory、审计 summary、
+`split_manifest.json`、`leakage_report.json` 和模型依赖清单。
 
-## 明确延后
+## Dev 数据恢复命令
 
-BIRD Mini-Dev SQLite 500 的 annotation 已固定为 500 条、11 个数据库，但完整数据库包在本机下载速度过低。根据项目约定，本轮未等待下载，因此以下内容没有伪造结果：
-
-- Dev500 数据库完整性与 SHA 清单；
-- Dev Gold SQL 全量执行清洗；
-- `Official-500` / `Final-N` 实际计数；
-- Train/Validation/Dev 泄漏审计；
-- Base/SFT/GRPO 模型指标。
-
-恢复时从以下命令继续，下载器支持固定 Hugging Face mirror 或官方 Drive 包：
+原始数据和 `outputs/` 不进入 Git。已有相同本地包时，可用以下命令重建全部 Dev 派生产物：
 
 ```bash
-uv run nl2sql-rl data download-dev --database-source mirror
+uv run nl2sql-rl data download-dev \
+  --database-source local \
+  --local-package-root dev500/raw/minidev
 uv run nl2sql-rl data clean-dev --resume
 uv run nl2sql-rl data split
 ```
@@ -41,3 +39,4 @@ uv run nl2sql-rl data split
 - LLM 行为 Judge。
 
 这些入口均已实现并由 mock、tiny 随机模型或 dry-run 覆盖，必须由用户在具备 API/GPU 和费用授权后显式启动。
+仓库没有生成或声称任何 Base/SFT/GRPO 的真实 Mini-Dev 指标。

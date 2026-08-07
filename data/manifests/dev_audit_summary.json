@@ -1,0 +1,17 @@
+{
+  "database_hashes_unchanged": true,
+  "dataset": "bird_mini_dev_sqlite_500",
+  "empty_result_count": 0,
+  "final_n": 498,
+  "inventory_sha256": "2ca7fa22dc781ab2b906b7920aca1c57ebf529003fe03f55f215af3716924bd6",
+  "max_workers": 4,
+  "official_count": 500,
+  "result_too_large_count": 0,
+  "schema_version": 1,
+  "status_counts": {
+    "passed": 498,
+    "timeout": 2
+  },
+  "timeout_seconds": 10.0,
+  "unverifiable_count": 2
+}
