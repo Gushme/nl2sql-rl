@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_pilot_transport_v2_window20",
+  "run_date": "2026-08-08",
+  "model": "deepseek-v4-flash-0731",
+  "project_git_sha_at_request": "edf3f4d8571851f0d8deb311dd6707dedebbb70d",
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4",
+  "teacher_behavior_hash": "765ef77d648ca8b84f541bfb4a2049eaaccf3ee2f9134032ef853ddb6a5e3d7c",
+  "collection_config_hash": "ff9824fc09ab8c14ea39071f56e41bba9abb7bbeebf6a30c1e0bf95c81b6ecb9",
+  "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
+  "migrated_accepted_trajectories": 1,
+  "paid_task_attempts": 20,
+  "attempted_by_split": {
+    "train": 18,
+    "validation": 2
+  },
+  "attempted_by_complexity": {
+    "simple": 6,
+    "moderate": 11,
+    "challenging": 3
+  },
+  "accepted_paid": 7,
+  "paid_acceptance_rate": 0.35,
+  "accepted_total_including_migration": 8,
+  "accepted_by_split_including_migration": {
+    "train": 7,
+    "validation": 1
+  },
+  "accepted_by_complexity_including_migration": {
+    "simple": 1,
+    "moderate": 6,
+    "challenging": 1
+  },
+  "rejection_reasons": {
+    "execution_not_correct": 9,
+    "model_or_request_error": 1,
+    "protocol_error": 1,
+    "tool_error:syntax_error": 1,
+    "tool_error:unsupported_function": 1
+  },
+  "ex_correct_but_rejected_for_trace_error": 3,
+  "responses": {
+    "total": 113,
+    "native_tool_call": 50,
+    "text_json": 63,
+    "normalization_failed": 3,
+    "invalid_text_action": 3,
+    "multiple_native_tool_calls": 0
+  },
+  "harness_metrics": {
+    "schema_calls": 21,
+    "schema_without_columns": 0,
+    "schema_truncated": 1,
+    "schema_with_omitted_tables": 1,
+    "execute_sql_calls": 41,
+    "execute_sql_timeouts": 1,
+    "execute_sqlite_errors": 2,
+    "unverified_submissions": 1,
+    "attempts_with_tool_error": 7,
+    "corrected_final_results": 3
+  },
+  "hidden_gold_diagnosis": {
+    "wrong_result_attempts": 9,
+    "gold_tables_fully_described": 9,
+    "prediction_physical_table_set_matches_gold": 7,
+    "timed_out_prediction_gold_checks_at_5_seconds": 2,
+    "timed_out_prediction_gold_checks_passed": 2,
+    "timed_out_prediction_gold_mean_elapsed_ms": 124.6
+  },
+  "deterministic_replay": {
+    "accepted_checked": 8,
+    "event_mismatches": 0,
+    "database_sha_mismatches": 0,
+    "accepted_invariant_violations": 0
+  },
+  "token_usage": {
+    "last_run_input_tokens": 137622,
+    "last_run_output_tokens": 10135,
+    "last_run_reasoning_tokens": 5744,
+    "last_run_total_tokens": 147757,
+    "campaign_total_tokens": 302427,
+    "campaign_token_limit": 1000000,
+    "campaign_remaining_tokens": 697573
+  },
+  "paused": true,
+  "pause_reasons": [
+    "execute_timeout_rate_gt_2pct",
+    "protocol_or_argument_error_rate_gt_5pct",
+    "stratum_execute_timeout_rate_gt_5pct"
+  ],
+  "pilot_acceptance_target_met": false,
+  "diagnosis": {
+    "schema_paging": "working_as_designed",
+    "execute_timeout": "inefficient_teacher_sql_not_harness_capacity",
+    "protocol_and_argument_errors": "teacher_behavior",
+    "semantic_errors": "teacher_reasoning_after_relevant_schema_was_visible"
+  },
+  "reasoning_content_saved": false
+}
