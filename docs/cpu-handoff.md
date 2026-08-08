@@ -21,6 +21,7 @@
 - 真实 Teacher Action 兼容性探针已完成：鉴权、thinking、reasoning token 明细和严格 JSON Action 均正常；模型以文本 JSON 返回合法 `list_tables` Action，共使用 783 Token，未保存思考内容。原先“必须原生 tool call”的探针判据与项目同时支持两种 Action 传输格式的协议不一致，已修正；模型可见 Harness 未改变。
 - 真实 Pilot transport v1 在 4 条任务后自动暂停：1 条合格，23 次响应中 2 次并行返回两个原生 tool call，累计使用 63,479 Token；schema 无截断、8 次 SQL 探索无超时或 SQLite 错误。客户端已固定 `parallel_tool_calls=false`，并将以新 Teacher 行为哈希和独立输出目录迁移唯一合格轨迹后续采。
 - Transport v2 canary 已完成旧轨迹确定性迁移，且 8 次新响应均未再出现并行 tool call；其中 1 次文本 Action 非法 JSON，整条轨迹仍被拒绝。监控现要求至少 20 条样本后再判断错误率阈值，避免 1/1 小样本误停；模型可见协议和接受标准没有变化。活动累计使用 89,170 / 1,000,000 Token。
+- Transport v2 又完成 8 条付费尝试并新增 4 条合格轨迹；一次第 5 轮请求的不可重试 4xx 暴露了错误状态未留档、单例被误判为系统性异常的问题。客户端现仅保存脱敏状态/错误类型，监控对单例只记录、同类重复两次或满 20 条后错误率超限才暂停；鉴权、预算与响应契约异常仍即时暂停。当前活动累计使用 154,670 / 1,000,000 Token，模型可见协议和轨迹验收标准未改变。
 
 权威机器可读结果见 `data/manifests/` 下的 Train/Dev inventory、审计 summary、
 `split_manifest.json`、`leakage_report.json`、Teacher 预检/Pilot 摘要和模型依赖清单。

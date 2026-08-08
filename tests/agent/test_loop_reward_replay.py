@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
 from nl2sql_rl.agent.fingerprint import harness_config_hash, harness_payload
-from nl2sql_rl.agent.loop import ScriptedPolicy, build_actor_messages, run_episode
+from nl2sql_rl.agent.loop import (
+    ModelResponse,
+    ScriptedPolicy,
+    build_actor_messages,
+    run_episode,
+)
 from nl2sql_rl.agent.replay import replay_episode
 from nl2sql_rl.agent.reward import score_terminal
 from nl2sql_rl.config import RuntimeConfig
@@ -133,6 +139,37 @@ def test_actor_context_never_contains_hidden_answer_or_reward(agent_db: Path) ->
     rollout = episode.model_dump_json()
     assert _answer().gold_sql not in rollout
     assert "gold_sql" not in rollout
+
+
+def test_policy_error_keeps_only_sanitized_diagnostic_detail(agent_db: Path) -> None:
+    class DiagnosticError(RuntimeError):
+        error_code = "model_or_request_error"
+        request_sent = True
+        diagnostic_detail: ClassVar[dict[str, str | int]] = {
+            "status_code": 400,
+            "provider_code": "invalid_parameter",
+        }
+
+    class FailingPolicy:
+        def generate(
+            self, messages: list[dict[str, Any]], *, max_tokens: int
+        ) -> ModelResponse:
+            del messages, max_tokens
+            raise DiagnosticError("不得落盘的服务端消息")
+
+    episode = run_episode(
+        _task(),
+        _answer(),
+        agent_db,
+        FailingPolicy(),
+        runtime=RuntimeConfig(),
+        config_hash="fixture",
+    )
+    assert episode.infrastructure_error_detail == {
+        "status_code": 400,
+        "provider_code": "invalid_parameter",
+    }
+    assert "不得落盘" not in episode.model_dump_json()
 
 
 def test_harness_hash_covers_runtime_protocol_guard_and_acceptance() -> None:

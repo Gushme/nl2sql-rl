@@ -100,6 +100,9 @@ class EpisodeResult(StrictRecord):
     usage: dict[str, int] = Field(default_factory=dict)
     database_sha256: str | None = None
     infrastructure_error_code: str | None = None
+    infrastructure_error_detail: dict[str, str | int | bool] = Field(
+        default_factory=dict
+    )
     infrastructure_request_sent: bool | None = None
     config_hash: str
 

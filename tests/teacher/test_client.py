@@ -306,7 +306,17 @@ async def test_multiple_native_tool_calls_are_rejected_as_one_step_protocol_erro
 @pytest.mark.asyncio
 async def test_authentication_error_is_fatal_and_classified() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, request=request)
+        return httpx.Response(
+            401,
+            request=request,
+            json={
+                "error": {
+                    "code": "invalid_api_key",
+                    "type": "authentication_error",
+                    "message": "该内容不得写入诊断",
+                }
+            },
+        )
 
     async with LLMClient(
         _config(),
@@ -318,6 +328,12 @@ async def test_authentication_error_is_fatal_and_classified() -> None:
             await client.complete_action([])
     assert captured.value.error_code == "authentication_error"
     assert captured.value.request_sent is True
+    assert captured.value.diagnostic_detail == {
+        "status_code": 401,
+        "provider_code": "invalid_api_key",
+        "provider_type": "authentication_error",
+    }
+    assert "message" not in captured.value.diagnostic_detail
 
 
 @pytest.mark.asyncio

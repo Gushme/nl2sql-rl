@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_pilot_transport_v2_partial",
+  "run_date": "2026-08-08",
+  "model": "deepseek-v4-flash-0731",
+  "project_git_sha_at_request": "fccf4ad5c9d1788a65bb88a08fe5393efe938e0b",
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4",
+  "teacher_behavior_hash": "765ef77d648ca8b84f541bfb4a2049eaaccf3ee2f9134032ef853ddb6a5e3d7c",
+  "collection_config_hash": "ff9824fc09ab8c14ea39071f56e41bba9abb7bbeebf6a30c1e0bf95c81b6ecb9",
+  "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
+  "migrated_accepted_trajectories": 1,
+  "paid_task_attempts_total": 9,
+  "paid_task_attempts_this_run": 8,
+  "accepted_paid_total": 4,
+  "accepted_this_run": 4,
+  "accepted_total_including_migration": 5,
+  "paid_acceptance_rate": 0.4444444444444444,
+  "accepted_by_split_including_migration": {
+    "train": 4,
+    "validation": 1
+  },
+  "accepted_by_complexity_including_migration": {
+    "simple": 1,
+    "moderate": 3,
+    "challenging": 1
+  },
+  "rejection_reasons_paid_total": {
+    "execution_not_correct": 3,
+    "model_or_request_error": 1,
+    "tool_error:syntax_error": 1
+  },
+  "responses_paid_total": {
+    "total": 44,
+    "native_tool_call": 20,
+    "text_json": 24,
+    "normalization_failed": 1,
+    "invalid_text_action": 1,
+    "multiple_native_tool_calls": 0
+  },
+  "harness_metrics_paid_total": {
+    "schema_calls": 9,
+    "schema_without_columns": 0,
+    "schema_truncated": 0,
+    "execute_sql_calls": 15,
+    "execute_sql_timeouts": 0,
+    "execute_sqlite_errors": 1,
+    "unverified_submissions": 0,
+    "infrastructure_errors": 1,
+    "database_sha_checks": 10,
+    "database_sha_mismatches": 0
+  },
+  "token_usage": {
+    "this_run_input_tokens": 62097,
+    "this_run_output_tokens": 3403,
+    "this_run_reasoning_tokens": 1405,
+    "this_run_total_tokens": 65500,
+    "campaign_total_tokens": 154670,
+    "campaign_token_limit": 1000000,
+    "campaign_remaining_tokens": 845330
+  },
+  "paused": true,
+  "pause_reasons": [
+    "systemic_api_or_budget_error"
+  ],
+  "diagnosis": "one_isolated_nonretryable_4xx_was_misclassified_as_systemic",
+  "provider_status_available_for_historical_error": false,
+  "remediation": "record_sanitized_provider_status_and_pause_on_repeated_or_rate_limited_api_errors",
+  "trajectory_acceptance_changed": false,
+  "model_visible_harness_changed": false,
+  "reasoning_content_saved": false
+}

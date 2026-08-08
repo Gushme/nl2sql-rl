@@ -9,7 +9,13 @@ import pytest
 from nl2sql_rl.agent.fingerprint import harness_config_hash
 from nl2sql_rl.config import RuntimeConfig
 from nl2sql_rl.io_utils import read_jsonl, stable_json, write_jsonl
-from nl2sql_rl.models import AgentAction, AuditStatus, HiddenAnswer, TaskView
+from nl2sql_rl.models import (
+    AgentAction,
+    AuditStatus,
+    HiddenAnswer,
+    TaskView,
+    TerminalReason,
+)
 from nl2sql_rl.teacher.campaign import prepare_campaign_state, register_campaign_attempt
 from nl2sql_rl.teacher.client import LLMCompletion
 from nl2sql_rl.teacher.collector import (
@@ -207,6 +213,66 @@ async def test_protocol_rate_threshold_waits_for_twenty_attempts(tmp_path: Path)
     assert len(read_jsonl(tmp_path / "invalid.jsonl")) == 20
     assert summary["latest_diagnostics"]["rate_threshold_sample_ready"] is True
     assert summary["latest_diagnostics"]["invalid_text_action_responses"] > 0
+
+
+@pytest.mark.asyncio
+async def test_isolated_request_error_is_recorded_but_not_systemic(tmp_path: Path) -> None:
+    tasks, answers = _fixtures(tmp_path)
+    output = tmp_path / "baseline.jsonl"
+    await collect_trajectories(
+        tasks,
+        answers,
+        tmp_path,
+        output,
+        GoodClient(),
+        runtime=RuntimeConfig(),
+        config=_config(),
+        tokenizer=CharacterTokenizer(),
+    )
+    rows = [TeacherAttempt.model_validate(row) for row in read_jsonl(output)]
+
+    failures: list[TeacherAttempt] = []
+    for row in rows:
+        failed_episode = row.episode.model_copy(
+            update={
+                "terminal_reason": TerminalReason.INFRASTRUCTURE_ERROR,
+                "reward": None,
+                "valid_for_training": False,
+                "infrastructure_error_code": "model_or_request_error",
+                "infrastructure_error_detail": {"status_code": 400},
+            }
+        )
+        failures.append(
+            row.model_copy(
+                update={
+                    "accepted": False,
+                    "rejection_reason": "model_or_request_error",
+                    "episode": failed_episode,
+                }
+            )
+        )
+
+    isolated = diagnose_attempts(
+        failures[:1],
+        tasks=tasks,
+        answers=answers,
+        db_root=tmp_path,
+        runtime=RuntimeConfig(),
+        replay_accepted=False,
+    )
+    assert "systemic_api_or_budget_error" not in isolated["pause_reasons"]
+    assert isolated["systemic_api_error_attempts"] == 1
+    assert isolated["infrastructure_details"] == {'{"status_code":400}': 1}
+
+    repeated = diagnose_attempts(
+        failures,
+        tasks=tasks,
+        answers=answers,
+        db_root=tmp_path,
+        runtime=RuntimeConfig(),
+        replay_accepted=False,
+    )
+    assert "systemic_api_or_budget_error" in repeated["pause_reasons"]
 
 
 @pytest.mark.asyncio

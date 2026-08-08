@@ -82,6 +82,7 @@ class TeacherAPIError(RuntimeError):
         cost_usd: float = 0.0,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        diagnostic_detail: dict[str, str | int | bool] | None = None,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
@@ -89,6 +90,26 @@ class TeacherAPIError(RuntimeError):
         self.cost_usd = cost_usd
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.diagnostic_detail = diagnostic_detail or {}
+
+
+def _provider_error_detail(response: httpx.Response) -> dict[str, str | int | bool]:
+    """只保留状态和稳定错误类型，避免把请求内容或服务端消息落盘。"""
+    detail: dict[str, str | int | bool] = {"status_code": response.status_code}
+    try:
+        payload = response.json()
+    except ValueError:
+        return detail
+    if not isinstance(payload, dict):
+        return detail
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return detail
+    for source, target in (("code", "provider_code"), ("type", "provider_type")):
+        value = error.get(source)
+        if isinstance(value, (str, int, bool)):
+            detail[target] = value
+    return detail
 
 
 class CostLimitExceeded(RuntimeError):
@@ -472,6 +493,7 @@ class LLMClient:
                             raise TeacherAPIError(
                                 f"Teacher 返回不可重试状态：{response.status_code}",
                                 error_code=error_code,
+                                diagnostic_detail=_provider_error_detail(response),
                             )
                     except (httpx.TimeoutException, httpx.TransportError):
                         if attempt >= self.config.max_retries:
@@ -484,6 +506,11 @@ class LLMClient:
                         raise TeacherAPIError(
                             f"Teacher 请求重试耗尽：{status}",
                             error_code="api_retry_exhausted",
+                            diagnostic_detail=(
+                                _provider_error_detail(response)
+                                if response is not None
+                                else {}
+                            ),
                         )
                     retry_after = (
                         float(response.headers.get("Retry-After", "0"))

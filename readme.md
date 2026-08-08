@@ -27,6 +27,8 @@ Teacher 采集前的 Harness v2 离线 Gold 预检也已完成：按真实采样
 
 Transport v2 canary 已验证并行 tool call 修复生效，并将旧版唯一合格轨迹确定性迁移；新采 1 条任务的 8 次响应中有 1 次文本 Action 不是合法 JSON，该轨迹仍被严格拒绝。监控曾在单条样本上误触发 5% 比例阈值，现改为累计至少 20 条后才评价比例阈值，不改变模型可见协议或轨迹验收标准。该 canary 使用 25,691 Token，活动累计使用 89,170 / 1,000,000 Token；脱敏证据见 `data/manifests/teacher_pilot_transport_v2_canary_summary.json`。
 
+Transport v2 随后追加 8 条付费尝试，其中 4 条合格；连同迁移轨迹，当前共有 5 条合格轨迹。44 次模型响应中没有再次出现并行 tool call，9 次 schema observation 均保留列信息，15 次 SQL 探索无超时，10 条已落盘轨迹的数据库 SHA 均未变化。一次发生在第 5 轮请求的不可重试 4xx 被旧规则误判为系统性异常；监控现只脱敏保存状态与错误类型，单次请求错误只记录，两个同类错误或满 20 条后错误率超限才暂停，鉴权、额度与响应契约错误仍即时暂停。活动累计使用 154,670 / 1,000,000 Token；脱敏证据见 `data/manifests/teacher_pilot_transport_v2_partial_summary.json`。
+
 ## 1. Fresh clone
 
 CPU 开发环境固定使用 Python 3.11 和 uv。本项目额外兼容 Python 3.12，仅用于固定的 veRL GPU 容器；本机 Python 3.13 不作为运行环境。

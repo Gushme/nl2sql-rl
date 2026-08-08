@@ -253,6 +253,7 @@ def diagnose_attempts(
     observations_followed_by_distinct_action = 0
     usage_values: dict[str, list[float]] = defaultdict(list)
     infrastructure_codes: Counter[str] = Counter()
+    infrastructure_details: Counter[str] = Counter()
 
     for attempt in attempts:
         episode = attempt.episode
@@ -279,6 +280,8 @@ def diagnose_attempts(
             usage_values[name].append(float(episode.usage.get(name, 0)))
         if episode.infrastructure_error_code:
             infrastructure_codes[episode.infrastructure_error_code] += 1
+        if episode.infrastructure_error_detail:
+            infrastructure_details[stable_json(episode.infrastructure_error_detail)] += 1
         protocol_attempt = False
         invalid_argument_attempt = False
         tool_error_attempt = False
@@ -439,18 +442,29 @@ def diagnose_attempts(
     accepted_violations = sum(_accepted_violation(attempt) for attempt in attempts)
     if accepted_violations:
         pause_reasons.append("accepted_trajectory_invariant_violation")
-    fatal_codes = {
+    immediate_fatal_codes = {
         "authentication_error",
-        "model_or_request_error",
-        "api_client_error",
-        "api_transport_error",
-        "api_retry_exhausted",
         "api_empty_response",
         "api_invalid_response",
         "cost_limit_exceeded",
         "token_limit_exceeded",
     }
-    if fatal_codes.intersection(infrastructure_codes):
+    systemic_candidate_codes = {
+        "model_or_request_error",
+        "api_client_error",
+        "api_transport_error",
+        "api_retry_exhausted",
+    }
+    systemic_api_errors = sum(
+        infrastructure_codes[code] for code in systemic_candidate_codes
+    )
+    repeated_systemic_code = any(
+        infrastructure_codes[code] >= 2 for code in systemic_candidate_codes
+    )
+    if immediate_fatal_codes.intersection(infrastructure_codes) or (
+        repeated_systemic_code
+        or (rate_sample_ready and systemic_api_errors / total > 0.05)
+    ):
         pause_reasons.append("systemic_api_or_budget_error")
     if missing_reasoning_breakdown:
         pause_reasons.append("reasoning_token_breakdown_missing")
@@ -532,6 +546,8 @@ def diagnose_attempts(
         },
         "usage": {name: _usage_summary(values) for name, values in usage_values.items()},
         "infrastructure_codes": dict(sorted(infrastructure_codes.items())),
+        "infrastructure_details": dict(sorted(infrastructure_details.items())),
+        "systemic_api_error_attempts": systemic_api_errors,
         "replay": {
             "checked": replay_checked,
             "mismatches": replay_mismatches,

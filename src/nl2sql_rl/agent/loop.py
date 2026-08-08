@@ -122,6 +122,7 @@ def run_episode(
     terminal_reason = TerminalReason.MAX_ACTIONS
     submitted_sql: str | None = None
     infrastructure_error_code: str | None = None
+    infrastructure_error_detail: dict[str, str | int | bool] = {}
     infrastructure_request_sent: bool | None = None
     toolbox = SQLiteToolbox(
         db_path,
@@ -153,6 +154,13 @@ def run_episode(
             infrastructure_error_code = str(
                 getattr(exc, "error_code", "policy_error")
             )
+            raw_detail = getattr(exc, "diagnostic_detail", {})
+            if isinstance(raw_detail, dict):
+                infrastructure_error_detail = {
+                    str(key): value
+                    for key, value in raw_detail.items()
+                    if isinstance(value, (str, int, bool))
+                }
             infrastructure_request_sent = getattr(exc, "request_sent", None)
             exception_cost_usd = float(getattr(exc, "cost_usd", 0.0))
             if exception_cost_usd > 0:
@@ -270,6 +278,7 @@ def run_episode(
         usage=usage,
         database_sha256=database_sha_after,
         infrastructure_error_code=infrastructure_error_code,
+        infrastructure_error_detail=infrastructure_error_detail,
         infrastructure_request_sent=infrastructure_request_sent,
         config_hash=config_hash,
     )
