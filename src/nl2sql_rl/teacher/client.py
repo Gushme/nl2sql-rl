@@ -1,4 +1,4 @@
-"""带限流、重试、费用闸门的 OpenAI-compatible Action 客户端。"""
+"""带限流、重试、费用与 Token 闸门的 OpenAI-compatible Action 客户端。"""
 
 from __future__ import annotations
 
@@ -55,9 +55,13 @@ class LLMClientConfig(StrictRecord):
         return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
 
     def pricing_fingerprint(self) -> str:
-        """冻结按美元折算的 token 单价，防止活动中途改变计费口径。"""
+        """冻结美元折算口径；Token 总配额由 Campaign 账本单独冻结。"""
+        has_usd_pricing = (
+            self.input_price_per_million > 0
+            and self.output_price_per_million > 0
+        )
         payload = {
-            "currency": "USD",
+            "mode": "usd_pricing" if has_usd_pricing else "no_usd_conversion",
             "input_price_per_million": self.input_price_per_million,
             "output_price_per_million": self.output_price_per_million,
         }
@@ -74,11 +78,15 @@ class TeacherAPIError(RuntimeError):
         error_code: str = "teacher_api_error",
         request_sent: bool = True,
         cost_usd: float = 0.0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.request_sent = request_sent
         self.cost_usd = cost_usd
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
 
 
 class CostLimitExceeded(RuntimeError):
@@ -92,10 +100,34 @@ class CostLimitExceeded(RuntimeError):
         *,
         request_sent: bool = False,
         cost_usd: float = 0.0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> None:
         super().__init__(message)
         self.request_sent = request_sent
         self.cost_usd = cost_usd
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class TokenLimitExceeded(RuntimeError):
+    """下一次请求的预留 Token 或实际用量超过累计上限。"""
+
+    error_code = "token_limit_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_sent: bool = False,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.request_sent = request_sent
+        self.cost_usd = 0.0
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
 
 
 @dataclass(frozen=True)
@@ -166,6 +198,77 @@ class CostLedger:
             self.reserved_usd = max(0.0, self.reserved_usd - self.reservation_usd)
 
 
+class TokenLedger:
+    """按接口返回的输入与输出 Token 做并发安全的累计记账。"""
+
+    def __init__(
+        self,
+        cap_tokens: int | None,
+        reservation_tokens: int,
+        *,
+        initial_used_tokens: int = 0,
+    ) -> None:
+        if cap_tokens is not None and cap_tokens <= 0:
+            raise ValueError("Teacher Token 上限必须大于 0")
+        if cap_tokens is not None and reservation_tokens <= 0:
+            raise ValueError("Teacher 单次请求 Token 预留必须大于 0")
+        if initial_used_tokens < 0 or (
+            cap_tokens is not None and initial_used_tokens > cap_tokens
+        ):
+            raise ValueError("Teacher 历史 Token 必须位于 0 到 Token 上限之间")
+        self.cap_tokens = cap_tokens
+        self.reservation_tokens = reservation_tokens
+        self.used_tokens = initial_used_tokens
+        self.reserved_tokens = 0
+        self._lock = asyncio.Lock()
+
+    async def reserve(self) -> None:
+        async with self._lock:
+            if self.cap_tokens is None:
+                return
+            projected = (
+                self.used_tokens + self.reserved_tokens + self.reservation_tokens
+            )
+            if projected > self.cap_tokens:
+                raise TokenLimitExceeded(
+                    f"Token 预留将超过上限：{projected} > {self.cap_tokens}"
+                )
+            self.reserved_tokens += self.reservation_tokens
+
+    async def settle(self, input_tokens: int, output_tokens: int) -> None:
+        actual_tokens = input_tokens + output_tokens
+        async with self._lock:
+            self.reserved_tokens = max(
+                0, self.reserved_tokens - self.reservation_tokens
+            )
+            self.used_tokens += actual_tokens
+            if self.cap_tokens is None:
+                return
+            if actual_tokens > self.reservation_tokens:
+                raise TokenLimitExceeded(
+                    "单次请求实际 Token 超过保守预留："
+                    f"{actual_tokens} > {self.reservation_tokens}",
+                    request_sent=True,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            if self.used_tokens > self.cap_tokens:
+                raise TokenLimitExceeded(
+                    f"实际 Token 超过上限：{self.used_tokens} > {self.cap_tokens}",
+                    request_sent=True,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+
+    async def release(self) -> None:
+        async with self._lock:
+            if self.cap_tokens is None:
+                return
+            self.reserved_tokens = max(
+                0, self.reserved_tokens - self.reservation_tokens
+            )
+
+
 def api_compatible_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     """把内部 tool observation 转为无需 tool_call_id 的 Qwen user 消息。"""
     converted: list[dict[str, str]] = []
@@ -230,17 +333,47 @@ class LLMClient:
         config: LLMClientConfig,
         *,
         api_key: str,
-        cost_limit_usd: float,
+        cost_limit_usd: float | None = None,
         initial_spent_usd: float = 0.0,
+        token_limit: int | None = None,
+        initial_used_tokens: int = 0,
+        max_request_tokens: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.config = config
         self._semaphore = asyncio.Semaphore(config.concurrency)
-        self._ledger = CostLedger(
-            cost_limit_usd,
-            config.max_request_cost_usd,
-            initial_spent_usd=initial_spent_usd,
+        has_usd_pricing = (
+            config.input_price_per_million > 0
+            and config.output_price_per_million > 0
         )
+        if has_usd_pricing and cost_limit_usd is None:
+            raise ValueError("设置美元 Token 单价时必须同时设置累计费用上限")
+        if config.real_api and cost_limit_usd is None and token_limit is None:
+            raise ValueError("真实 Teacher API 必须设置费用上限或 Token 上限")
+        if token_limit is not None and max_request_tokens is None:
+            raise ValueError("设置 Token 上限时必须提供单次请求的保守 Token 上界")
+        self._ledger = (
+            CostLedger(
+                cost_limit_usd,
+                config.max_request_cost_usd,
+                initial_spent_usd=initial_spent_usd,
+            )
+            if cost_limit_usd is not None
+            else None
+        )
+        if token_limit is not None:
+            assert max_request_tokens is not None
+            self._token_ledger = TokenLedger(
+                token_limit,
+                max_request_tokens,
+                initial_used_tokens=initial_used_tokens,
+            )
+        else:
+            self._token_ledger = TokenLedger(
+                None,
+                0,
+                initial_used_tokens=initial_used_tokens,
+            )
         self._client = httpx.AsyncClient(
             base_url=config.endpoint.rstrip("/") + "/",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -266,7 +399,15 @@ class LLMClient:
 
     @property
     def spent_usd(self) -> float:
-        return self._ledger.spent_usd
+        return self._ledger.spent_usd if self._ledger is not None else 0.0
+
+    @property
+    def used_tokens(self) -> int:
+        return self._token_ledger.used_tokens
+
+    @property
+    def token_limit(self) -> int | None:
+        return self._token_ledger.cap_tokens
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -289,10 +430,15 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
     ) -> LLMCompletion:
-        await self._ledger.reserve()
-        settled = False
+        cost_reserved = False
+        tokens_reserved = False
         started = time.monotonic()
         try:
+            if self._ledger is not None:
+                await self._ledger.reserve()
+                cost_reserved = True
+            await self._token_ledger.reserve()
+            tokens_reserved = True
             async with self._semaphore:
                 payload = {
                     "model": self.config.model,
@@ -406,8 +552,25 @@ class LLMClient:
                         error_code="api_invalid_response",
                     )
                 cost = self._cost(input_tokens, output_tokens)
-                await self._ledger.settle(cost)
-                settled = True
+                budget_error: RuntimeError | None = None
+                if self._ledger is not None:
+                    try:
+                        await self._ledger.settle(cost)
+                    except CostLimitExceeded as exc:
+                        exc.input_tokens = input_tokens
+                        exc.output_tokens = output_tokens
+                        budget_error = exc
+                    finally:
+                        cost_reserved = False
+                try:
+                    await self._token_ledger.settle(input_tokens, output_tokens)
+                except TokenLimitExceeded as exc:
+                    if budget_error is None:
+                        budget_error = exc
+                finally:
+                    tokens_reserved = False
+                if budget_error is not None:
+                    raise budget_error
                 completion_details_value = usage.get(
                     "completion_tokens_details", usage.get("output_tokens_details")
                 )
@@ -433,12 +596,16 @@ class LLMClient:
                         "Teacher token 明细不是整数",
                         error_code="api_invalid_response",
                         cost_usd=cost,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
                     ) from exc
                 if reasoning_tokens is not None and not 0 <= reasoning_tokens <= output_tokens:
                     raise TeacherAPIError(
                         "reasoning_tokens 不在 completion_tokens 范围内",
                         error_code="api_invalid_response",
                         cost_usd=cost,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
                     )
                 action_tokens = (
                     output_tokens - reasoning_tokens
@@ -450,6 +617,8 @@ class LLMClient:
                         "cached_tokens 不在 prompt_tokens 范围内",
                         error_code="api_invalid_response",
                         cost_usd=cost,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
                     )
                 return LLMCompletion(
                     action=action,
@@ -472,5 +641,7 @@ class LLMClient:
                     reasoning_present=has_reasoning,
                 )
         finally:
-            if not settled:
+            if cost_reserved and self._ledger is not None:
                 await self._ledger.release()
+            if tokens_reserved:
+                await self._token_ledger.release()

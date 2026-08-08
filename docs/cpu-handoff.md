@@ -44,4 +44,4 @@ uv run nl2sql-rl data split
 这些入口均已实现并由 mock、tiny 随机模型或 dry-run 覆盖，必须由用户在具备 API/GPU 和费用授权后显式启动。
 仓库没有生成或声称任何 Base/SFT/GRPO 的真实 Mini-Dev 指标。
 
-真实 Teacher 启动前必须轮换曾经在聊天中出现过的密钥，并通过无回显环境变量注入。仓库配置只保留占位 endpoint 和零价格哨兵；输入、输出 token 的美元折算单价必须从 Model Studio 控制台读取并显式提供。探针、正式采集、累计费用、尝试次数、采样清单、Teacher 行为配置、计费口径、Harness 版本、诊断暂停和轨迹迁移共用同一个本地活动账本。
+真实 Teacher 密钥只通过无回显环境变量注入，仓库配置只保留占位 endpoint。若已有明确 Token 额度，可用 `--token-limit` 直接建立累计硬闸门；若需要美元费用报告，则必须从 Model Studio 控制台读取输入、输出单价并同时设置费用上限。探针、正式采集、累计 Token、可选费用、尝试次数、采样清单、Teacher 行为配置、计费口径、Harness 版本、诊断暂停和轨迹迁移共用同一个本地活动账本。

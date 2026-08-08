@@ -99,7 +99,7 @@ def test_external_and_gpu_targets_require_explicit_confirmation(target: str) -> 
     assert "run_grpo_container.sh" not in output
 
 
-def test_teacher_requires_api_key_and_explicit_cost_limit_after_confirmation() -> None:
+def test_teacher_requires_api_key_and_explicit_budget_after_confirmation() -> None:
     environment = dict(os.environ)
     environment.pop("TEACHER_API_KEY", None)
     environment.pop("TEACHER_INPUT_PRICE_PER_MILLION", None)
@@ -140,7 +140,7 @@ def test_teacher_requires_api_key_and_explicit_cost_limit_after_confirmation() -
         env=environment,
     )
     assert missing_cost.returncode != 0
-    assert "TEACHER_COST_LIMIT_USD 必须显式设置" in (
+    assert "TEACHER_TOKEN_LIMIT 或完整美元费用闸门" in (
         missing_cost.stdout + missing_cost.stderr
     )
     assert "fixture-secret" not in missing_cost.stdout + missing_cost.stderr
@@ -167,3 +167,41 @@ def test_teacher_requires_api_key_and_explicit_cost_limit_after_confirmation() -
     )
     assert "fixture-secret" not in missing_price.stdout + missing_price.stderr
     assert "teacher collect" not in missing_price.stdout + missing_price.stderr
+
+
+def test_teacher_guard_accepts_token_only_budget_without_usd_prices() -> None:
+    environment = dict(os.environ)
+    environment["TEACHER_API_KEY"] = "fixture-secret"
+    result = subprocess.run(
+        [
+            "make",
+            "guard-teacher",
+            "CONFIRM=1",
+            "TEACHER_ENDPOINT=https://teacher.invalid/v1",
+            "TEACHER_MODEL=fixture",
+            "TEACHER_TOKEN_LIMIT=1000000",
+            "TEACHER_COST_LIMIT_USD=",
+            "TEACHER_INPUT_PRICE_PER_MILLION=",
+            "TEACHER_OUTPUT_PRICE_PER_MILLION=",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0
+    assert "fixture-secret" not in result.stdout + result.stderr
+
+    dry_run = _make(
+        "-n",
+        "teacher-probe",
+        "CONFIRM=1",
+        "TEACHER_ENDPOINT=https://teacher.invalid/v1",
+        "TEACHER_MODEL=fixture",
+        "TEACHER_TOKEN_LIMIT=1000000",
+    )
+    output = dry_run.stdout + dry_run.stderr
+    assert dry_run.returncode == 0
+    assert '--token-limit "1000000"' in output
+    assert "--cost-limit-usd" not in output

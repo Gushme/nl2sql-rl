@@ -160,6 +160,16 @@ def run_episode(
                     usage,
                     {"cost_micro_usd": round(exception_cost_usd * 1_000_000)},
                 )
+            exception_input_tokens = int(getattr(exc, "input_tokens", 0))
+            exception_output_tokens = int(getattr(exc, "output_tokens", 0))
+            if exception_input_tokens > 0 or exception_output_tokens > 0:
+                _merge_usage(
+                    usage,
+                    {
+                        "input_tokens": exception_input_tokens,
+                        "billed_output_tokens": exception_output_tokens,
+                    },
+                )
             break
         _merge_usage(usage, response.usage)
         action_tokens = response.usage.get(

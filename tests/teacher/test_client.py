@@ -6,7 +6,9 @@ from typing import Any
 
 import httpx
 import pytest
+import typer
 
+from nl2sql_rl.cli import _validate_teacher_budget
 from nl2sql_rl.models import AgentAction
 from nl2sql_rl.teacher.client import (
     CostLimitExceeded,
@@ -14,6 +16,7 @@ from nl2sql_rl.teacher.client import (
     LLMClientConfig,
     LLMCompletion,
     TeacherAPIError,
+    TokenLimitExceeded,
     api_compatible_messages,
 )
 from nl2sql_rl.teacher.probe import run_function_call_probe
@@ -64,6 +67,49 @@ def _config(**updates: Any) -> LLMClientConfig:
     return LLMClientConfig.model_validate(values)
 
 
+def test_teacher_budget_accepts_token_only_mode_without_fake_usd_price() -> None:
+    request_tokens = _validate_teacher_budget(
+        input_price_per_million=0.0,
+        output_price_per_million=0.0,
+        max_context_tokens=16_384,
+        max_completion_tokens=8_192,
+        max_request_cost_usd=0.01,
+        cost_limit_usd=None,
+        token_limit=1_000_000,
+    )
+    assert request_tokens == 28_672
+
+
+def test_teacher_budget_rejects_missing_or_incomplete_guards() -> None:
+    common = {
+        "max_context_tokens": 16_384,
+        "max_completion_tokens": 8_192,
+        "max_request_cost_usd": 0.01,
+        "cost_limit_usd": None,
+    }
+    with pytest.raises(typer.BadParameter, match="Token 上限或完整费用闸门"):
+        _validate_teacher_budget(
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+            token_limit=None,
+            **common,
+        )
+    with pytest.raises(typer.BadParameter, match="同时设置"):
+        _validate_teacher_budget(
+            input_price_per_million=1.0,
+            output_price_per_million=0.0,
+            token_limit=1_000_000,
+            **common,
+        )
+    with pytest.raises(typer.BadParameter, match="保守 Token 上界"):
+        _validate_teacher_budget(
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+            token_limit=28_671,
+            **common,
+        )
+
+
 @pytest.mark.asyncio
 async def test_client_normalizes_native_tool_call_and_text_json() -> None:
     calls = 0
@@ -92,6 +138,7 @@ async def test_client_normalizes_native_tool_call_and_text_json() -> None:
         assert second.action.action == "submit_sql"
         assert first.cost_usd == pytest.approx(0.00014)
         assert client.spent_usd == pytest.approx(0.00028)
+        assert client.used_tokens == 240
 
 
 @pytest.mark.asyncio
@@ -374,6 +421,76 @@ async def test_actual_request_cost_cannot_exceed_reservation() -> None:
     assert captured.value.request_sent is True
     assert captured.value.cost_usd == pytest.approx(0.00014)
     assert client.spent_usd == pytest.approx(0.00014)
+
+
+@pytest.mark.asyncio
+async def test_token_quota_tracks_exact_returned_usage() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(request, content='{"action":"list_tables","arguments":{}}')
+
+    async with LLMClient(
+        _config(
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+        ),
+        api_key="mock",
+        token_limit=1_000,
+        max_request_tokens=200,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        await client.complete_action([])
+        await client.complete_action([])
+        assert client.used_tokens == 240
+        assert client.token_limit == 1_000
+        assert client.spent_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_token_quota_blocks_before_external_call() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _response(request, content='{"action":"list_tables","arguments":{}}')
+
+    async with LLMClient(
+        _config(
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+        ),
+        api_key="mock",
+        token_limit=100,
+        max_request_tokens=200,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(TokenLimitExceeded) as captured:
+            await client.complete_action([])
+    assert captured.value.request_sent is False
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_actual_tokens_cannot_exceed_conservative_reservation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(request, content='{"action":"list_tables","arguments":{}}')
+
+    async with LLMClient(
+        _config(
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+        ),
+        api_key="mock",
+        token_limit=1_000,
+        max_request_tokens=100,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(TokenLimitExceeded) as captured:
+            await client.complete_action([])
+        assert client.used_tokens == 120
+    assert captured.value.request_sent is True
+    assert captured.value.input_tokens == 100
+    assert captured.value.output_tokens == 20
 
 
 def test_internal_tool_observation_becomes_qwen_compatible_user_message() -> None:

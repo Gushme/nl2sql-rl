@@ -58,18 +58,15 @@ make pipeline-cpu
 
 `data-all` 和 `pipeline-cpu` 要求本地已经存在 `train/` 与 `dev500/raw/minidev`。路径可通过 `DEV_PACKAGE_ROOT`、`E2E_OUTPUT`、`PROJECT_CONFIG` 等 Make 变量覆盖。
 
-真实 Teacher API 和 GPU 操作必须显式设置 `CONFIRM=1`；Teacher 还要求费用上限，API key 只从环境变量读取且不会出现在命令行：
+真实 Teacher API 和 GPU 操作必须显式设置 `CONFIRM=1`；Teacher 还要求累计 Token 上限或完整美元费用闸门。API key 只从环境变量读取且不会出现在命令行：
 
 ```bash
 read -s TEACHER_API_KEY
 export TEACHER_API_KEY
-read -r TEACHER_INPUT_PRICE_PER_MILLION
-read -r TEACHER_OUTPUT_PRICE_PER_MILLION
-export TEACHER_INPUT_PRICE_PER_MILLION TEACHER_OUTPUT_PRICE_PER_MILLION
 CONFIRM=1 \
 TEACHER_ENDPOINT=https://provider.example/v1 \
 TEACHER_MODEL=deepseek-v4-flash-0731 \
-TEACHER_COST_LIMIT_USD=20 \
+TEACHER_TOKEN_LIMIT=1000000 \
 make teacher-collect
 
 CONFIRM=1 make sft-run
@@ -183,20 +180,17 @@ make teacher-harness-preflight
 
 当前计划池为 8,585 条，实际配额可行性已经验证：Train 61 个数据库、Validation 8 个数据库均有目标，计划前 100 条严格保持 90/10 和 30/50/20。离线 Gold 预检将完整逐任务记录写到忽略目录 `outputs/teacher/harness_preflight.json`，终端只显示无 Gold 的摘要。
 
-真实请求必须同时提供轮换后的 API key、费用上限、控制台单价和显式确认。[阿里云 DeepSeek API 文档](https://help.aliyun.com/en/model-studio/deepseek-api)说明思考 token 按输出 token 计费，但该工作区模型的实际价格必须从 Model Studio 控制台读取；项目不内置猜测价格。若控制台使用人民币，应先按本次活动固定汇率折算为美元单价，活动期间禁止变更口径。`reasoning_content` 只在响应解析期间读取，绝不保存或回传。下面的 endpoint 必须通过参数或 Make 变量注入，不写入仓库：
+真实请求必须同时提供 API key、显式确认，以及累计 Token 上限或完整美元费用闸门。Token 模式直接累计接口返回的 `prompt_tokens + completion_tokens`，并在并发请求前保守预留；因此不需要虚构未知的美元单价。[阿里云 DeepSeek API 文档](https://help.aliyun.com/en/model-studio/deepseek-api)说明思考 token 按输出 token 计费。若另需美元费用报告，输入与输出单价及费用上限必须一起提供，且活动期间禁止变更口径。`reasoning_content` 只在响应解析期间读取，绝不保存或回传。下面的 endpoint 必须通过参数或 Make 变量注入，不写入仓库：
 
 ```bash
 read -s TEACHER_API_KEY
 export TEACHER_API_KEY
-read -r TEACHER_INPUT_PRICE_PER_MILLION
-read -r TEACHER_OUTPUT_PRICE_PER_MILLION
-export TEACHER_INPUT_PRICE_PER_MILLION TEACHER_OUTPUT_PRICE_PER_MILLION
 
 # 先发起恰好一次受保护的 Function Calling 探针。
 CONFIRM=1 \
 TEACHER_ENDPOINT=https://provider.example/v1 \
 TEACHER_MODEL=deepseek-v4-flash-0731 \
-TEACHER_COST_LIMIT_USD=20 \
+TEACHER_TOKEN_LIMIT=1000000 \
 make teacher-probe
 
 uv run nl2sql-rl teacher collect \
@@ -205,17 +199,14 @@ uv run nl2sql-rl teacher collect \
   --db-root train \
   --endpoint https://provider.example/v1 \
   --model deepseek-v4-flash-0731 \
-  --cost-limit-usd 20 \
-  --input-price-per-million "$TEACHER_INPUT_PRICE_PER_MILLION" \
-  --output-price-per-million "$TEACHER_OUTPUT_PRICE_PER_MILLION" \
-  --max-request-cost-usd 0.01 \
+  --token-limit 1000000 \
   --run-attempt-limit 100 \
   --enable-thinking \
   --reasoning-effort high \
   --confirm-real-api
 ```
 
-采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时。活动账本 `campaign_state.json` 跨运行、跨 Harness 版本累计探针与正式请求，1,500 次尝试和费用上限都不会因升级或续采重置。每 100 次尝试冻结一个诊断批次；协议/参数错误、schema 信息丢失、超时、上下文溢出、循环、replay 不一致、数据库 SHA 改变或系统性 API 异常达到门槛时会自动停止后续请求。
+采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时。活动账本 `campaign_state.json` 跨运行、跨 Harness 版本累计探针与正式请求，1,500 次尝试、Token 上限和可选费用上限都不会因升级或续采重置。每 100 次尝试冻结一个诊断批次；协议/参数错误、schema 信息丢失、超时、上下文溢出、循环、replay 不一致、数据库 SHA 改变、预算耗尽或系统性 API 异常达到门槛时会自动停止后续请求。
 
 如果模型可见 Prompt、工具 schema、observation、超时、SQL Guard 或接受标准变化，必须使用新的 Harness 哈希和输出文件。旧轨迹只有在初始 Actor 消息、可见协议、逐事件 observation、最终 SQL、Reward 和数据库 SHA 全部一致时才能迁移；否则任务回到原分层队列重新采集。最终 SFT 只接受一个 Harness 配置哈希。
 

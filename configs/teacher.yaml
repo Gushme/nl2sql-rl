@@ -11,7 +11,8 @@ temperature: 0.0
 seed: 42
 enable_thinking: true
 reasoning_effort: high
-# 私有部署的真实价格必须从控制台读取，并折算为美元后显式覆盖。
+# 可优先设置累计 Token 硬上限；如需美元费用报告，再从控制台读取真实单价。
+token_limit: null
 input_price_per_million: 0.0
 output_price_per_million: 0.0
 max_request_cost_usd: 0.01

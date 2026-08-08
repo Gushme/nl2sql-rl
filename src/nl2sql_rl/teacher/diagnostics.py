@@ -212,6 +212,8 @@ def diagnose_attempts(
     replay_accepted: bool,
     cost_limit_usd: float | None = None,
     spent_usd: float | None = None,
+    token_limit: int | None = None,
+    used_tokens: int | None = None,
 ) -> dict[str, Any]:
     """统计一个批次；只有 accepted 轨迹参与确定性 replay 门禁。"""
     total = len(attempts)
@@ -434,6 +436,7 @@ def diagnose_attempts(
         "api_empty_response",
         "api_invalid_response",
         "cost_limit_exceeded",
+        "token_limit_exceeded",
     }
     if fatal_codes.intersection(infrastructure_codes):
         pause_reasons.append("systemic_api_or_budget_error")
@@ -445,6 +448,12 @@ def diagnose_attempts(
         and spent_usd > cost_limit_usd + 1e-12
     ):
         pause_reasons.append("campaign_cost_limit_exceeded")
+    if (
+        token_limit is not None
+        and used_tokens is not None
+        and used_tokens > token_limit
+    ):
+        pause_reasons.append("campaign_token_limit_exceeded")
 
     return {
         "schema_version": 1,
@@ -515,6 +524,12 @@ def diagnose_attempts(
             "database_sha256": dict(sorted(current_sha.items())),
         },
         "accepted_invariant_violations": accepted_violations,
+        "budget": {
+            "cost_limit_usd": cost_limit_usd,
+            "spent_usd": spent_usd,
+            "token_limit": token_limit,
+            "used_tokens": used_tokens,
+        },
         "by_database": by_database,
         "by_complexity": by_complexity,
         "by_sampling_cell": by_sampling_cell,

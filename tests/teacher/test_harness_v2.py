@@ -402,6 +402,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
         target_total=2,
         max_attempts=2,
         cost_limit_usd=20.0,
+        token_limit=1_000,
         sampling_manifest_hash="sampling-v1",
         teacher_behavior_hash="teacher-v1",
         pricing_hash="pricing-v1",
@@ -410,6 +411,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
     assert state.sampling_manifest_hash == "sampling-v1"
     assert state.teacher_behavior_hash == "teacher-v1"
     assert state.pricing_hash == "pricing-v1"
+    assert state.used_tokens == 90
     first_episode_id = TeacherAttempt.model_validate(
         read_jsonl(attempts_path)[0]
     ).episode.episode_id
@@ -418,6 +420,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
         state,
         episode_id=first_episode_id,
         spent_usd=state.spent_usd,
+        used_tokens=state.used_tokens,
         harness_config_hash="harness",
     )
     assert unchanged.attempts == 2
@@ -428,6 +431,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
             target_total=2,
             max_attempts=2,
             cost_limit_usd=21.0,
+            token_limit=1_000,
         )
     with pytest.raises(ValueError, match="采样清单"):
         prepare_campaign_state(
@@ -436,6 +440,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
             target_total=2,
             max_attempts=2,
             cost_limit_usd=20.0,
+            token_limit=1_000,
             sampling_manifest_hash="sampling-v2",
         )
     with pytest.raises(ValueError, match="Teacher 行为配置"):
@@ -445,6 +450,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
             target_total=2,
             max_attempts=2,
             cost_limit_usd=20.0,
+            token_limit=1_000,
             teacher_behavior_hash="teacher-v2",
         )
     with pytest.raises(ValueError, match="计费口径"):
@@ -454,5 +460,36 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
             target_total=2,
             max_attempts=2,
             cost_limit_usd=20.0,
+            token_limit=1_000,
             pricing_hash="pricing-v2",
+        )
+    with pytest.raises(ValueError, match="Token 上限"):
+        prepare_campaign_state(
+            state_path,
+            attempt_paths=[attempts_path],
+            target_total=2,
+            max_attempts=2,
+            cost_limit_usd=20.0,
+            token_limit=999,
+        )
+
+
+def test_campaign_state_supports_token_only_budget(tmp_path: Path) -> None:
+    state_path = tmp_path / "token_campaign.json"
+    state = prepare_campaign_state(
+        state_path,
+        attempt_paths=[],
+        target_total=1_000,
+        max_attempts=1_500,
+        token_limit=1_000_000,
+    )
+    assert state.cost_limit_usd is None
+    assert state.token_limit == 1_000_000
+    assert state.used_tokens == 0
+    with pytest.raises(ValueError, match="费用上限或 Token 上限"):
+        prepare_campaign_state(
+            tmp_path / "invalid_campaign.json",
+            attempt_paths=[],
+            target_total=1_000,
+            max_attempts=1_500,
         )

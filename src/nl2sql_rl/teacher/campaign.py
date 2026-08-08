@@ -1,4 +1,4 @@
-"""跨 Harness 版本保存 Teacher 活动的累计尝试与费用。"""
+"""跨 Harness 版本保存 Teacher 活动的累计尝试、费用与 Token。"""
 
 from __future__ import annotations
 
@@ -12,13 +12,15 @@ from nl2sql_rl.models import StrictRecord
 
 
 class CampaignState(StrictRecord):
-    schema_version: int = 1
+    schema_version: int = 2
     campaign_id: str
     target_total: int = Field(ge=1)
     max_attempts: int = Field(ge=1)
-    cost_limit_usd: float = Field(gt=0)
+    cost_limit_usd: float | None = Field(default=None, gt=0)
+    token_limit: int | None = Field(default=None, ge=1)
     attempts: int = Field(default=0, ge=0)
     spent_micro_usd: int = Field(default=0, ge=0)
+    used_tokens: int = Field(default=0, ge=0)
     sampling_manifest_hash: str | None = None
     teacher_behavior_hash: str | None = None
     pricing_hash: str | None = None
@@ -41,20 +43,29 @@ def prepare_campaign_state(
     attempt_paths: list[Path],
     target_total: int,
     max_attempts: int,
-    cost_limit_usd: float,
+    cost_limit_usd: float | None = None,
+    token_limit: int | None = None,
     sampling_manifest_hash: str | None = None,
     teacher_behavior_hash: str | None = None,
     pricing_hash: str | None = None,
 ) -> CampaignState:
-    """先恢复所有已知落盘请求，再创建 API 客户端费用账本。"""
+    """先恢复所有已知落盘请求，再创建 API 客户端预算账本。"""
+    if cost_limit_usd is None and token_limit is None:
+        raise ValueError("Teacher campaign 必须设置费用上限或 Token 上限")
     if path.is_file():
         import json
 
         state = CampaignState.model_validate(json.loads(path.read_text(encoding="utf-8")))
         if state.target_total != target_total or state.max_attempts != max_attempts:
             raise ValueError("Teacher campaign 的目标或尝试上限不能在续采时改变")
-        if abs(state.cost_limit_usd - cost_limit_usd) > 1e-12:
+        if (state.cost_limit_usd is None) != (cost_limit_usd is None) or (
+            state.cost_limit_usd is not None
+            and cost_limit_usd is not None
+            and abs(state.cost_limit_usd - cost_limit_usd) > 1e-12
+        ):
             raise ValueError("Teacher campaign 的累计费用上限不能在续采时改变")
+        if state.token_limit != token_limit:
+            raise ValueError("Teacher campaign 的累计 Token 上限不能在续采时改变")
         if (
             sampling_manifest_hash is not None
             and state.sampling_manifest_hash is not None
@@ -80,6 +91,7 @@ def prepare_campaign_state(
             target_total=target_total,
             max_attempts=max_attempts,
             cost_limit_usd=cost_limit_usd,
+            token_limit=token_limit,
             sampling_manifest_hash=sampling_manifest_hash,
             teacher_behavior_hash=teacher_behavior_hash,
             pricing_hash=pricing_hash,
@@ -87,6 +99,7 @@ def prepare_campaign_state(
     recorded = set(state.recorded_episode_ids)
     attempts = state.attempts
     spent_micro_usd = state.spent_micro_usd
+    used_tokens = state.used_tokens
     for attempt_path in attempt_paths:
         for row in read_jsonl(attempt_path):
             if row.get("migrated_from") is not None:
@@ -99,18 +112,35 @@ def prepare_campaign_state(
                 continue
             usage = episode.get("usage")
             cost = int(usage.get("cost_micro_usd", 0)) if isinstance(usage, dict) else 0
+            input_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
+            if isinstance(usage, dict):
+                billed_output_value = usage.get("billed_output_tokens")
+                billed_output_tokens = int(
+                    usage.get("output_tokens", 0)
+                    if billed_output_value is None
+                    else billed_output_value
+                )
+            else:
+                billed_output_tokens = 0
             recorded.add(episode_id)
             attempts += 1
             spent_micro_usd += cost
+            used_tokens += input_tokens + billed_output_tokens
     state = state.model_copy(
         update={
             "attempts": attempts,
             "spent_micro_usd": spent_micro_usd,
+            "used_tokens": used_tokens,
             "recorded_episode_ids": sorted(recorded),
         }
     )
-    if state.spent_usd > state.cost_limit_usd + 1e-12:
+    if (
+        state.cost_limit_usd is not None
+        and state.spent_usd > state.cost_limit_usd + 1e-12
+    ):
         raise ValueError("Teacher campaign 历史费用已超过累计上限")
+    if state.token_limit is not None and state.used_tokens > state.token_limit:
+        raise ValueError("Teacher campaign 历史 Token 已超过累计上限")
     write_json(path, state.model_dump(mode="json"))
     return state
 
@@ -121,6 +151,7 @@ def register_campaign_attempt(
     *,
     episode_id: str,
     spent_usd: float,
+    used_tokens: int,
     harness_config_hash: str,
 ) -> CampaignState:
     recorded = set(state.recorded_episode_ids)
@@ -136,6 +167,7 @@ def register_campaign_attempt(
                 state.spent_micro_usd,
                 round(spent_usd * 1_000_000),
             ),
+            "used_tokens": max(state.used_tokens, used_tokens),
             "recorded_episode_ids": sorted(recorded),
             "harness_config_hashes": harness_hashes,
         }

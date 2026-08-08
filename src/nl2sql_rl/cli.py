@@ -75,20 +75,38 @@ app.add_typer(train_app, name="train")
 app.add_typer(eval_app, name="eval")
 
 
-def _validate_teacher_pricing(
+def _validate_teacher_budget(
     *,
     input_price_per_million: float,
     output_price_per_million: float,
     max_context_tokens: int,
     max_completion_tokens: int,
     max_request_cost_usd: float,
-    cost_limit_usd: float,
-) -> None:
-    """确保费用预留覆盖单次请求的保守 token 上界。"""
-    if input_price_per_million <= 0 or output_price_per_million <= 0:
-        raise typer.BadParameter("真实 Teacher 调用必须显式设置控制台 token 单价")
+    cost_limit_usd: float | None,
+    token_limit: int | None,
+) -> int:
+    """校验真实调用预算，并返回单次请求的保守 Token 上界。"""
+    has_input_price = input_price_per_million > 0
+    has_output_price = output_price_per_million > 0
+    if has_input_price != has_output_price:
+        raise typer.BadParameter("输入与输出 Token 单价必须同时设置或同时省略")
+    has_usd_pricing = has_input_price and has_output_price
+    if not has_usd_pricing and token_limit is None:
+        raise typer.BadParameter("真实 Teacher 调用必须设置 Token 上限或完整费用闸门")
     # 工具 JSON schema 也计入 Teacher prompt，额外预留 4K token。
     conservative_input_tokens = max_context_tokens + 4_096
+    conservative_request_tokens = conservative_input_tokens + max_completion_tokens
+    if token_limit is not None and token_limit < conservative_request_tokens:
+        raise typer.BadParameter(
+            "token_limit 小于单次请求的保守 Token 上界："
+            f"{token_limit} < {conservative_request_tokens}"
+        )
+    if not has_usd_pricing:
+        if cost_limit_usd is not None:
+            raise typer.BadParameter("未设置 Token 单价时不能声明美元费用上限")
+        return conservative_request_tokens
+    if cost_limit_usd is None:
+        raise typer.BadParameter("设置 Token 单价时必须同时设置累计费用上限")
     conservative_request_cost = (
         conservative_input_tokens * input_price_per_million
         + max_completion_tokens * output_price_per_million
@@ -100,6 +118,7 @@ def _validate_teacher_pricing(
         )
     if max_request_cost_usd > cost_limit_usd + 1e-12:
         raise typer.BadParameter("max_request_cost_usd 不能超过活动费用上限")
+    return conservative_request_tokens
 
 
 @app.command()
@@ -561,7 +580,10 @@ def eval_compare(
 def teacher_probe(
     endpoint: Annotated[str, typer.Option()],
     model: Annotated[str, typer.Option()],
-    cost_limit_usd: Annotated[float, typer.Option(min=0.000001)],
+    cost_limit_usd: Annotated[
+        float | None, typer.Option(min=0.000001)
+    ] = None,
+    token_limit: Annotated[int | None, typer.Option(min=1)] = None,
     output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
         "outputs/teacher/probe.json"
     ),
@@ -579,7 +601,7 @@ def teacher_probe(
         "configs/project.yaml"
     ),
 ) -> None:
-    """执行一次受累计费用保护的 thinking + Function Calling 探针。"""
+    """执行一次受累计预算保护的 thinking + Function Calling 探针。"""
     if not confirm_real_api:
         raise typer.BadParameter("真实 Teacher probe 必须显式设置 --confirm-real-api")
     if output.exists():
@@ -588,13 +610,14 @@ def teacher_probe(
     if not api_key:
         raise typer.BadParameter(f"环境变量 {api_key_env} 未设置")
     project = load_project_config(config)
-    _validate_teacher_pricing(
+    max_request_tokens = _validate_teacher_budget(
         input_price_per_million=input_price_per_million,
         output_price_per_million=output_price_per_million,
         max_context_tokens=project.runtime.max_context_tokens,
         max_completion_tokens=8_192,
         max_request_cost_usd=max_request_cost_usd,
         cost_limit_usd=cost_limit_usd,
+        token_limit=token_limit,
     )
     client_config = LLMClientConfig(
         endpoint=endpoint,
@@ -619,16 +642,20 @@ def teacher_probe(
         target_total=target_total,
         max_attempts=max_attempts,
         cost_limit_usd=cost_limit_usd,
+        token_limit=token_limit,
         teacher_behavior_hash=client_config.behavior_fingerprint(),
         pricing_hash=client_config.pricing_fingerprint(),
     )
 
-    async def run() -> tuple[dict[str, Any], float]:
+    async def run() -> tuple[dict[str, Any], float, int]:
         async with LLMClient(
             client_config,
             api_key=api_key,
             cost_limit_usd=cost_limit_usd,
             initial_spent_usd=campaign_state.spent_usd,
+            token_limit=token_limit,
+            initial_used_tokens=campaign_state.used_tokens,
+            max_request_tokens=max_request_tokens,
         ) as client:
             try:
                 report = await run_function_call_probe(client)
@@ -640,13 +667,29 @@ def teacher_probe(
                     "error_code": error_code,
                     "request_sent": getattr(exc, "request_sent", None),
                     "cost_usd": float(getattr(exc, "cost_usd", 0.0)),
+                    "usage": {
+                        "input_tokens": int(getattr(exc, "input_tokens", 0)),
+                        "output_tokens": int(getattr(exc, "output_tokens", 0)),
+                        "total_tokens": int(getattr(exc, "input_tokens", 0))
+                        + int(getattr(exc, "output_tokens", 0)),
+                    },
                     "reasoning_content_saved": False,
                 }
-            return report, client.spent_usd
+            return report, client.spent_usd, client.used_tokens
 
-    report, spent_usd = asyncio.run(run())
+    report, spent_usd, used_tokens = asyncio.run(run())
+    report["campaign_usage"] = {
+        "spent_usd": spent_usd,
+        "cost_limit_usd": cost_limit_usd,
+        "used_tokens": used_tokens,
+        "token_limit": token_limit,
+    }
     error_code = str(report.get("error_code", ""))
-    if error_code != "cost_limit_exceeded" or report.get("request_sent") is True:
+    budget_blocked_before_request = (
+        error_code in {"cost_limit_exceeded", "token_limit_exceeded"}
+        and report.get("request_sent") is False
+    )
+    if not budget_blocked_before_request:
         response_id = str(report.get("response_id") or "")
         episode_id = response_id or "probe_" + hashlib.sha256(
             stable_json(
@@ -661,6 +704,7 @@ def teacher_probe(
             campaign_state,
             episode_id=episode_id,
             spent_usd=spent_usd,
+            used_tokens=used_tokens,
             harness_config_hash=harness_config_hash(project.runtime),
         )
     write_json(output, report)
@@ -750,7 +794,10 @@ def teacher_collect(
     db_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
     endpoint: Annotated[str, typer.Option()],
     model: Annotated[str, typer.Option()],
-    cost_limit_usd: Annotated[float, typer.Option(min=0.000001)],
+    cost_limit_usd: Annotated[
+        float | None, typer.Option(min=0.000001)
+    ] = None,
+    token_limit: Annotated[int | None, typer.Option(min=1)] = None,
     output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
         "outputs/teacher/attempts.jsonl"
     ),
@@ -797,19 +844,22 @@ def teacher_collect(
         "configs/project.yaml"
     ),
 ) -> None:
-    """采集合格 Teacher 轨迹；真实 API 需要费用上限和显式确认。"""
+    """采集合格 Teacher 轨迹；真实 API 需要预算上限和显式确认。"""
     if real_api and not confirm_real_api:
         raise typer.BadParameter("真实 Teacher 采集必须显式设置 --confirm-real-api")
     project = load_project_config(config)
     if real_api:
-        _validate_teacher_pricing(
+        max_request_tokens = _validate_teacher_budget(
             input_price_per_million=input_price_per_million,
             output_price_per_million=output_price_per_million,
             max_context_tokens=project.runtime.max_context_tokens,
             max_completion_tokens=max_completion_tokens,
             max_request_cost_usd=max_request_cost_usd,
             cost_limit_usd=cost_limit_usd,
+            token_limit=token_limit,
         )
+    else:
+        max_request_tokens = None
     if reasoning_effort not in {"low", "medium", "high"}:
         raise typer.BadParameter("reasoning_effort 必须是 low、medium 或 high")
     api_key = os.environ.get(api_key_env)
@@ -861,6 +911,7 @@ def teacher_collect(
         target_total=target_total,
         max_attempts=max_attempts,
         cost_limit_usd=cost_limit_usd,
+        token_limit=token_limit,
         sampling_manifest_hash=sampling_plan.manifest_hash,
         teacher_behavior_hash=client_config.behavior_fingerprint(),
         pricing_hash=client_config.pricing_fingerprint(),
@@ -871,6 +922,9 @@ def teacher_collect(
             api_key=api_key,
             cost_limit_usd=cost_limit_usd,
             initial_spent_usd=campaign_state.spent_usd,
+            token_limit=token_limit,
+            initial_used_tokens=campaign_state.used_tokens,
+            max_request_tokens=max_request_tokens,
         ) as client:
             return await collect_trajectories(
                 task_rows,

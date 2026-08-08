@@ -281,6 +281,16 @@ def _client_behavior_hash(client: TeacherActionClient) -> str:
     return str(value) if value is not None else client.config_hash
 
 
+def _client_used_tokens(client: TeacherActionClient) -> int:
+    """兼容不启用 Token 闸门的 mock 客户端。"""
+    return int(getattr(client, "used_tokens", 0))
+
+
+def _client_token_limit(client: TeacherActionClient) -> int | None:
+    value = getattr(client, "token_limit", None)
+    return int(value) if value is not None else None
+
+
 def _collection_hash(
     client: TeacherActionClient,
     runtime: RuntimeConfig,
@@ -451,11 +461,14 @@ async def collect_trajectories(
             break
         results = await asyncio.gather(*(collect_one(task_by_id[task_id]) for task_id in task_ids))
         for attempt in results:
-            if (
-                attempt.episode.infrastructure_error_code == "cost_limit_exceeded"
-                and attempt.episode.infrastructure_request_sent is False
-            ):
-                pause_reasons.append("cost_limit_exceeded_before_request")
+            budget_error = attempt.episode.infrastructure_error_code in {
+                "cost_limit_exceeded",
+                "token_limit_exceeded",
+            }
+            if budget_error and attempt.episode.infrastructure_request_sent is False:
+                pause_reasons.append(
+                    f"{attempt.episode.infrastructure_error_code}_before_request"
+                )
                 continue
             _append_attempt(output_path, attempt)
             scheduler.register(attempt.task_id, accepted=attempt.accepted)
@@ -470,6 +483,7 @@ async def collect_trajectories(
                     campaign_state,
                     episode_id=attempt.episode.episode_id,
                     spent_usd=client.spent_usd,
+                    used_tokens=_client_used_tokens(client),
                     harness_config_hash=current_harness_hash,
                 )
         if not current_diagnostic_batch:
@@ -486,6 +500,8 @@ async def collect_trajectories(
                 campaign_state.cost_limit_usd if campaign_state is not None else None
             ),
             spent_usd=client.spent_usd,
+            token_limit=_client_token_limit(client),
+            used_tokens=_client_used_tokens(client),
         )
         latest_diagnostics.update(
             {
@@ -499,6 +515,8 @@ async def collect_trajectories(
                 "campaign_attempts": campaign_attempts,
                 "version_attempts": len(version_paid_attempts),
                 "spent_usd": client.spent_usd,
+                "used_tokens": _client_used_tokens(client),
+                "token_limit": _client_token_limit(client),
             }
         )
         pause_reasons.extend(str(value) for value in latest_diagnostics["pause_reasons"])
@@ -522,17 +540,30 @@ async def collect_trajectories(
                 projected_cost = (
                     client.spent_usd / max(1, campaign_attempts) * projected_attempts
                 )
+                projected_tokens = (
+                    _client_used_tokens(client)
+                    / max(1, campaign_attempts)
+                    * projected_attempts
+                )
                 latest_diagnostics["pilot_projection"] = {
                     "attempts": projected_attempts,
                     "cost_usd": projected_cost,
+                    "tokens": projected_tokens,
                 }
                 if projected_attempts > config.max_attempts:
                     pause_reasons.append("projected_attempts_gt_1500")
                 if (
                     campaign_state is not None
+                    and campaign_state.cost_limit_usd is not None
                     and projected_cost > campaign_state.cost_limit_usd
                 ):
                     pause_reasons.append("projected_cost_gt_campaign_limit")
+                if (
+                    campaign_state is not None
+                    and campaign_state.token_limit is not None
+                    and projected_tokens > campaign_state.token_limit
+                ):
+                    pause_reasons.append("projected_tokens_gt_campaign_limit")
             latest_diagnostics["pause_reasons"] = sorted(set(pause_reasons))
             latest_diagnostics["pause"] = bool(pause_reasons)
             if diagnostics_dir is not None:
@@ -585,6 +616,8 @@ async def collect_trajectories(
             and run_attempts >= config.run_attempt_limit
         ),
         "spent_usd": client.spent_usd,
+        "used_tokens": _client_used_tokens(client),
+        "token_limit": _client_token_limit(client),
         "config_hash": collection_hash,
         "harness_config_hash": current_harness_hash,
         "visible_protocol_hash": current_visible_protocol_hash,

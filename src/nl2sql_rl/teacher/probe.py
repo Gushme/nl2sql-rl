@@ -56,6 +56,7 @@ async def run_function_call_probe(client: ProbeClient) -> dict[str, Any]:
         "usage": {
             "input_tokens": completion.input_tokens,
             "output_tokens": completion.output_tokens,
+            "total_tokens": completion.input_tokens + completion.output_tokens,
             "reasoning_tokens": completion.reasoning_tokens,
             "reasoning_present": completion.reasoning_present,
             "action_tokens": completion.action_tokens,

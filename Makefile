@@ -32,6 +32,7 @@ CONFIRM ?= 0
 TEACHER_ENDPOINT ?=
 TEACHER_MODEL ?= deepseek-v4-flash-0731
 TEACHER_COST_LIMIT_USD ?=
+TEACHER_TOKEN_LIMIT ?=
 TEACHER_INPUT_PRICE_PER_MILLION ?=
 TEACHER_OUTPUT_PRICE_PER_MILLION ?=
 TEACHER_MAX_REQUEST_COST_USD ?= 0.01
@@ -86,7 +87,7 @@ help:
 		'  teacher-plan      离线生成分层采样配额，不调用 API' \
 		'  teacher-harness-preflight 用前 100 个 Gold 离线验证 Harness' \
 		'  teacher-probe     单次 Function Calling 探针；要求 CONFIRM=1' \
-		'  teacher-collect   真实 Teacher API；要求 CONFIRM=1 和费用上限' \
+		'  teacher-collect   真实 Teacher API；要求 CONFIRM=1 和预算上限' \
 		'  teacher-build-sft 构建 Action-only SFT 数据' \
 		'  sft-preflight     SFT 配置与数据预检' \
 		'  sft-run           GPU SFT；要求 CONFIRM=1' \
@@ -146,9 +147,12 @@ guard-teacher: guard-confirm
 	@if [[ -z "$$TEACHER_API_KEY" ]]; then echo "拒绝执行：环境变量 TEACHER_API_KEY 未设置"; exit 2; fi
 	@if [[ -z "$(TEACHER_ENDPOINT)" ]]; then echo "拒绝执行：TEACHER_ENDPOINT 未设置"; exit 2; fi
 	@if [[ -z "$(TEACHER_MODEL)" ]]; then echo "拒绝执行：TEACHER_MODEL 未设置"; exit 2; fi
-	@if [[ -z "$(TEACHER_COST_LIMIT_USD)" ]]; then echo "拒绝执行：TEACHER_COST_LIMIT_USD 必须显式设置"; exit 2; fi
-	@if [[ -z "$(TEACHER_INPUT_PRICE_PER_MILLION)" ]]; then echo "拒绝执行：必须按控制台设置 TEACHER_INPUT_PRICE_PER_MILLION"; exit 2; fi
-	@if [[ -z "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" ]]; then echo "拒绝执行：必须按控制台设置 TEACHER_OUTPUT_PRICE_PER_MILLION"; exit 2; fi
+	@if [[ -z "$(TEACHER_TOKEN_LIMIT)" && -z "$(TEACHER_COST_LIMIT_USD)" ]]; then echo "拒绝执行：必须显式设置 TEACHER_TOKEN_LIMIT 或完整美元费用闸门"; exit 2; fi
+	@if [[ -n "$(TEACHER_COST_LIMIT_USD)" || -n "$(TEACHER_INPUT_PRICE_PER_MILLION)" || -n "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" ]]; then \
+		if [[ -z "$(TEACHER_COST_LIMIT_USD)" ]]; then echo "拒绝执行：美元计费模式缺少 TEACHER_COST_LIMIT_USD"; exit 2; fi; \
+		if [[ -z "$(TEACHER_INPUT_PRICE_PER_MILLION)" ]]; then echo "拒绝执行：美元计费模式缺少 TEACHER_INPUT_PRICE_PER_MILLION"; exit 2; fi; \
+		if [[ -z "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" ]]; then echo "拒绝执行：美元计费模式缺少 TEACHER_OUTPUT_PRICE_PER_MILLION"; exit 2; fi; \
+	fi
 
 teacher-plan:
 	$(CLI) teacher plan \
@@ -171,12 +175,9 @@ teacher-harness-preflight:
 teacher-probe: guard-teacher
 	$(CLI) teacher probe \
 		--endpoint "$(TEACHER_ENDPOINT)" \
-		--model "$(TEACHER_MODEL)" \
-		--cost-limit-usd "$(TEACHER_COST_LIMIT_USD)" \
+		--model "$(TEACHER_MODEL)" $(if $(TEACHER_COST_LIMIT_USD),--cost-limit-usd "$(TEACHER_COST_LIMIT_USD)") $(if $(TEACHER_TOKEN_LIMIT),--token-limit "$(TEACHER_TOKEN_LIMIT)") \
 		--output "$(TEACHER_PROBE_OUTPUT)" \
-		--campaign-state-output "$(TEACHER_CAMPAIGN_STATE)" \
-		--input-price-per-million "$(TEACHER_INPUT_PRICE_PER_MILLION)" \
-		--output-price-per-million "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" \
+		--campaign-state-output "$(TEACHER_CAMPAIGN_STATE)" $(if $(TEACHER_INPUT_PRICE_PER_MILLION),--input-price-per-million "$(TEACHER_INPUT_PRICE_PER_MILLION)") $(if $(TEACHER_OUTPUT_PRICE_PER_MILLION),--output-price-per-million "$(TEACHER_OUTPUT_PRICE_PER_MILLION)") \
 		--max-request-cost-usd "$(TEACHER_MAX_REQUEST_COST_USD)" \
 		--target-total "$(TEACHER_TARGET_TOTAL)" \
 		--max-attempts "$(TEACHER_MAX_ATTEMPTS)" \
@@ -188,14 +189,11 @@ teacher-collect: guard-teacher
 		--answers "$(TEACHER_ANSWERS)" \
 		--db-root "$(TEACHER_DB_ROOT)" \
 		--endpoint "$(TEACHER_ENDPOINT)" \
-		--model "$(TEACHER_MODEL)" \
-		--cost-limit-usd "$(TEACHER_COST_LIMIT_USD)" \
+		--model "$(TEACHER_MODEL)" $(if $(TEACHER_COST_LIMIT_USD),--cost-limit-usd "$(TEACHER_COST_LIMIT_USD)") $(if $(TEACHER_TOKEN_LIMIT),--token-limit "$(TEACHER_TOKEN_LIMIT)") \
 		--output "$(TEACHER_ATTEMPTS)" \
 		--summary-output "$(TEACHER_SUMMARY)" \
 		--diagnostics-dir "$(TEACHER_DIAGNOSTICS_DIR)" \
-		--campaign-state-output "$(TEACHER_CAMPAIGN_STATE)" $(if $(TEACHER_MIGRATE_FROM),--migrate-from "$(TEACHER_MIGRATE_FROM)") \
-		--input-price-per-million "$(TEACHER_INPUT_PRICE_PER_MILLION)" \
-		--output-price-per-million "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" \
+		--campaign-state-output "$(TEACHER_CAMPAIGN_STATE)" $(if $(TEACHER_MIGRATE_FROM),--migrate-from "$(TEACHER_MIGRATE_FROM)") $(if $(TEACHER_INPUT_PRICE_PER_MILLION),--input-price-per-million "$(TEACHER_INPUT_PRICE_PER_MILLION)") $(if $(TEACHER_OUTPUT_PRICE_PER_MILLION),--output-price-per-million "$(TEACHER_OUTPUT_PRICE_PER_MILLION)") \
 		--max-request-cost-usd "$(TEACHER_MAX_REQUEST_COST_USD)" \
 		--target-total "$(TEACHER_TARGET_TOTAL)" \
 		--train-quota "$(TEACHER_TRAIN_QUOTA)" \
