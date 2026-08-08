@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "kind": "teacher_harness_gold_preflight",
+  "kind": "teacher_harness_gold_preflight_history",
   "run_date": "2026-08-08",
   "model_api_called": false,
   "gold_sql_saved": false,
@@ -24,13 +24,6 @@
   "submission_timeout_seconds": 10.0,
   "sampling_version": "stratified-v3-data-bound",
   "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
-  "harness_version": "teacher-harness-v3",
-  "harness_config_hash": "e8cc17b628985fd958340f53a5d9b1dd700ce0a0f6442d1d894391acd0b835a5",
-  "visible_protocol_hash": "7f82fbbf1d3f51829538584c430101ef98237f78a030fb00e0fd6800a026c6b2",
-  "context_token_semantics": "max_qwen_chatml_before_request",
-  "v2_accepted_migration_check": {
-    "eligible": 8,
-    "migrated": 0,
-    "rejected_initial_actor_messages_changed": 8
-  }
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4"
 }

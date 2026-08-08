@@ -8,6 +8,7 @@ from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any
 
+from nl2sql_rl.agent.loop import build_actor_messages
 from nl2sql_rl.agent.parser import normalized_action
 from nl2sql_rl.agent.replay import replay_episode
 from nl2sql_rl.agent.sql_semantics import SQLSemanticError, normalize_sql, physical_tables
@@ -17,6 +18,7 @@ from nl2sql_rl.models import HiddenAnswer, TaskView, TerminalReason
 
 if TYPE_CHECKING:
     from nl2sql_rl.teacher.collector import TeacherAttempt
+    from nl2sql_rl.training.sft_data import TokenizerLike
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -43,7 +45,11 @@ def _usage_summary(values: list[float]) -> dict[str, float]:
     }
 
 
-def _group_metrics(attempts: Sequence[TeacherAttempt], key: str) -> dict[str, Any]:
+def _group_metrics(
+    attempts: Sequence[TeacherAttempt],
+    key: str,
+    actor_context_tokens: dict[str, int],
+) -> dict[str, Any]:
     groups: dict[str, list[TeacherAttempt]] = defaultdict(list)
     for attempt in attempts:
         if key == "database":
@@ -134,7 +140,10 @@ def _group_metrics(attempts: Sequence[TeacherAttempt], key: str) -> dict[str, An
                 [float(len(attempt.episode.events)) for attempt in rows]
             ),
             "context_tokens": _usage_summary(
-                [float(attempt.episode.usage.get("context_tokens", 0)) for attempt in rows]
+                [
+                    float(actor_context_tokens.get(attempt.episode.episode_id, 0))
+                    for attempt in rows
+                ]
             ),
             "latency_ms": _usage_summary(
                 [float(attempt.episode.usage.get("latency_ms", 0)) for attempt in rows]
@@ -144,6 +153,41 @@ def _group_metrics(attempts: Sequence[TeacherAttempt], key: str) -> dict[str, An
             ),
         }
     return report
+
+
+def _max_actor_context_tokens(
+    task: TaskView,
+    attempt: TeacherAttempt,
+    tokenizer: TokenizerLike,
+) -> int:
+    """重建每次请求前的 Qwen ChatML，返回单轮最大上下文而非多轮总和。"""
+    from nl2sql_rl.training.sft_data import chat_messages_token_count
+
+    messages = build_actor_messages(task)
+    counts: list[int] = []
+    for event in attempt.episode.events:
+        counts.append(chat_messages_token_count(messages, tokenizer))
+        if event.action is not None:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": stable_json(event.action.model_dump(mode="json")),
+                }
+            )
+        messages.append(
+            {
+                "role": "tool",
+                "event_id": event.event_id,
+                "name": event.observation.tool,
+                "content": stable_json(event.observation.model_dump(mode="json")),
+            }
+        )
+    if (
+        attempt.episode.terminal_reason is TerminalReason.INFRASTRUCTURE_ERROR
+        and attempt.episode.infrastructure_request_sent is True
+    ):
+        counts.append(chat_messages_token_count(messages, tokenizer))
+    return max(counts, default=0)
 
 
 def _accepted_violation(attempt: TeacherAttempt) -> bool:
@@ -214,6 +258,7 @@ def diagnose_attempts(
     spent_usd: float | None = None,
     token_limit: int | None = None,
     used_tokens: int | None = None,
+    tokenizer: TokenizerLike | None = None,
 ) -> dict[str, Any]:
     """统计一个批次；只有 accepted 轨迹参与确定性 replay 门禁。"""
     total = len(attempts)
@@ -248,19 +293,41 @@ def diagnose_attempts(
     native_tool_calls = 0
     text_json_calls = 0
     response_calls = 0
+    finish_reasons: Counter[str] = Counter()
     missing_reasoning_breakdown = 0
     observations_followed_by_action = 0
     observations_followed_by_distinct_action = 0
     usage_values: dict[str, list[float]] = defaultdict(list)
     infrastructure_codes: Counter[str] = Counter()
     infrastructure_details: Counter[str] = Counter()
+    task_by_id = {task.task_id: task for task in tasks}
+    actor_context_tokens: dict[str, int] = {}
 
     for attempt in attempts:
         episode = attempt.episode
+        actor_context_tokens[episode.episode_id] = (
+            _max_actor_context_tokens(task_by_id[attempt.task_id], attempt, tokenizer)
+            if tokenizer is not None
+            else int(episode.usage.get("context_tokens", 0))
+        )
         normalization_failures += episode.usage.get("normalization_failed", 0)
         native_tool_calls += episode.usage.get("native_tool_call", 0)
         text_json_calls += episode.usage.get("text_json", 0)
         response_calls += episode.usage.get("response_count", 0)
+        known_finish_reasons = 0
+        for name, usage_key in (
+            ("stop", "finish_reason_stop"),
+            ("tool_calls", "finish_reason_tool_calls"),
+            ("length", "finish_reason_length"),
+            ("other", "finish_reason_other"),
+        ):
+            count = episode.usage.get(usage_key, 0)
+            finish_reasons[name] += count
+            known_finish_reasons += count
+        finish_reasons["missing_or_legacy"] += max(
+            0,
+            episode.usage.get("response_count", 0) - known_finish_reasons,
+        )
         if (
             episode.usage.get("reasoning_present", 0) > 0
             and episode.usage.get("reasoning_tokens_reported", 0) == 0
@@ -275,9 +342,11 @@ def diagnose_attempts(
             "action_tokens",
             "latency_ms",
             "cost_micro_usd",
-            "context_tokens",
         ):
             usage_values[name].append(float(episode.usage.get(name, 0)))
+        usage_values["context_tokens"].append(
+            float(actor_context_tokens[episode.episode_id])
+        )
         if episode.infrastructure_error_code:
             infrastructure_codes[episode.infrastructure_error_code] += 1
         if episode.infrastructure_error_detail:
@@ -364,7 +433,6 @@ def diagnose_attempts(
             ):
                 observations_followed_by_distinct_action += 1
 
-    task_by_id = {task.task_id: task for task in tasks}
     answer_by_id = {answer.task_id: answer for answer in answers}
     replay_checked = 0
     replay_mismatches = 0
@@ -400,10 +468,10 @@ def diagnose_attempts(
             for db_ref, digest in current_sha.items()
         )
 
-    by_database = _group_metrics(attempts, "database")
-    by_complexity = _group_metrics(attempts, "complexity")
-    by_sampling_cell = _group_metrics(attempts, "sampling_cell")
-    by_database_size = _group_metrics(attempts, "database_size")
+    by_database = _group_metrics(attempts, "database", actor_context_tokens)
+    by_complexity = _group_metrics(attempts, "complexity", actor_context_tokens)
+    by_sampling_cell = _group_metrics(attempts, "sampling_cell", actor_context_tokens)
+    by_database_size = _group_metrics(attempts, "database_size", actor_context_tokens)
     pause_reasons: list[str] = []
     if total >= 20 and not any(attempt.accepted for attempt in attempts[:20]):
         pause_reasons.append("first_20_without_accepted")
@@ -497,6 +565,7 @@ def diagnose_attempts(
         "native_tool_calls": native_tool_calls,
         "text_json_calls": text_json_calls,
         "response_calls": response_calls,
+        "finish_reasons": dict(sorted(finish_reasons.items())),
         "normalization_failure_rate": (
             normalization_failures / response_calls if response_calls else 0.0
         ),
@@ -545,6 +614,11 @@ def diagnose_attempts(
             ),
         },
         "usage": {name: _usage_summary(values) for name, values in usage_values.items()},
+        "context_token_semantics": (
+            "max_qwen_chatml_before_request"
+            if tokenizer is not None
+            else "episode_usage_fallback"
+        ),
         "infrastructure_codes": dict(sorted(infrastructure_codes.items())),
         "infrastructure_details": dict(sorted(infrastructure_details.items())),
         "systemic_api_error_attempts": systemic_api_errors,

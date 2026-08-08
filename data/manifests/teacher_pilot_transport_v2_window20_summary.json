@@ -64,6 +64,7 @@
     "wrong_result_attempts": 9,
     "gold_tables_fully_described": 9,
     "prediction_physical_table_set_matches_gold": 7,
+    "teacher_exploration_timeout_seconds": 10.0,
     "timed_out_prediction_gold_checks_at_5_seconds": 2,
     "timed_out_prediction_gold_checks_passed": 2,
     "timed_out_prediction_gold_mean_elapsed_ms": 124.6
@@ -92,7 +93,7 @@
   "pilot_acceptance_target_met": false,
   "diagnosis": {
     "schema_paging": "working_as_designed",
-    "execute_timeout": "inefficient_teacher_sql_not_harness_capacity",
+    "execute_timeout": "prediction_timed_out_at_10_seconds_while_gold_passed_below_5_seconds",
     "protocol_and_argument_errors": "teacher_behavior",
     "semantic_errors": "teacher_reasoning_after_relevant_schema_was_visible"
   },

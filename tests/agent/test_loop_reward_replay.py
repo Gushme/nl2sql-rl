@@ -182,6 +182,8 @@ def test_harness_hash_covers_runtime_protocol_guard_and_acceptance() -> None:
     assert payload["observation_schema"]
     assert payload["sql_guard_version"]
     assert payload["acceptance_version"] == 2
+    assert payload["harness_version"] == "teacher-harness-v3"
+    assert "禁止再次嵌套 arguments" in payload["visible_protocol"]["system_prompt"]
 
 
 def test_full_event_replay_detects_observation_tampering(agent_db: Path) -> None:

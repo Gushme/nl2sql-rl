@@ -157,6 +157,7 @@ class _ThreadBridgePolicy:
             if self.tokenizer is not None
             else completion.action_tokens
         )
+        finish_reason = completion.finish_reason
         return ModelResponse(
             content=content,
             usage={
@@ -176,6 +177,12 @@ class _ThreadBridgePolicy:
                 "native_tool_call": int(completion.response_format == "native_tool_call"),
                 "text_json": int(completion.response_format == "text_json"),
                 "response_count": 1,
+                "finish_reason_stop": int(finish_reason == "stop"),
+                "finish_reason_tool_calls": int(finish_reason == "tool_calls"),
+                "finish_reason_length": int(finish_reason in {"length", "max_tokens"}),
+                "finish_reason_other": int(
+                    finish_reason not in {None, "stop", "tool_calls", "length", "max_tokens"}
+                ),
                 "cost_micro_usd": round(completion.cost_usd * 1_000_000),
             },
         )
@@ -500,9 +507,10 @@ async def collect_trajectories(
                 campaign_state.cost_limit_usd if campaign_state is not None else None
             ),
             spent_usd=client.spent_usd,
-            token_limit=_client_token_limit(client),
-            used_tokens=_client_used_tokens(client),
-        )
+                token_limit=_client_token_limit(client),
+                used_tokens=_client_used_tokens(client),
+                tokenizer=tokenizer,
+            )
         latest_diagnostics.update(
             {
                 "config_hash": collection_hash,

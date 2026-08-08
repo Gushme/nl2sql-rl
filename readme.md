@@ -29,7 +29,7 @@ Transport v2 canary 已验证并行 tool call 修复生效，并将旧版唯一�
 
 Transport v2 随后追加 8 条付费尝试，其中 4 条合格；连同迁移轨迹，当前共有 5 条合格轨迹。44 次模型响应中没有再次出现并行 tool call，9 次 schema observation 均保留列信息，15 次 SQL 探索无超时，10 条已落盘轨迹的数据库 SHA 均未变化。一次发生在第 5 轮请求的不可重试 4xx 被旧规则误判为系统性异常；监控现只脱敏保存状态与错误类型，单次请求错误只记录，两个同类错误或满 20 条后错误率超限才暂停，鉴权、额度与响应契约错误仍即时暂停。活动累计使用 154,670 / 1,000,000 Token；脱敏证据见 `data/manifests/teacher_pilot_transport_v2_partial_summary.json`。
 
-Transport v2 的 20 条付费诊断窗口已完成：7 条合格，合格率 35%；连同迁移轨迹共 8 条。窗口因协议/参数错误率和 SQL 探索超时率超过阈值而暂停。隐藏 Gold 对照证明超时样本的 Gold 在 5 秒内两次约 0.12 秒完成，故保持 5 秒限制；9 条结果错误均已展示 Gold 所需物理表，schema 分页也没有丢失列信息，主要瓶颈是 Teacher 的 Action 纪律与语义推理，而不是只读执行器容量。8 条合格轨迹逐事件 replay 全部一致，数据库 SHA 无变化。活动累计使用 302,427 / 1,000,000 Token；脱敏证据见 `data/manifests/teacher_pilot_transport_v2_window20_summary.json`。
+Transport v2 的 20 条付费诊断窗口已完成：7 条合格，合格率 35%；连同迁移轨迹共 8 条。窗口因协议/参数错误率和 SQL 探索超时率超过阈值而暂停。预测 SQL 在现行 10 秒探索上限下超时，而对应 Gold 在更严格的 5 秒限制下两次约 0.12 秒完成，故不放宽 10 秒上限；9 条结果错误均已展示 Gold 所需物理表，schema 分页也没有丢失列信息，主要瓶颈是 Teacher 的 Action 纪律与语义推理，而不是只读执行器容量。8 条合格轨迹逐事件 replay 全部一致，数据库 SHA 无变化。活动累计使用 302,427 / 1,000,000 Token；脱敏证据见 `data/manifests/teacher_pilot_transport_v2_window20_summary.json`。
 
 ## 1. Fresh clone
 
@@ -153,7 +153,7 @@ uv run nl2sql-rl data split
 
 允许的五个工具为 `list_tables`、`describe_schema`、`search_values`、`execute_sql` 和 `submit_sql`。SQL 同时经过 sqlglot guard、SQLite authorizer、`query_only=ON` 和只读 URI；DDL/DML、PRAGMA、ATTACH、扩展加载、多语句和写入型 CTE 均被拒绝。
 
-Teacher Harness v2 额外强制以下接受条件：
+当前 Teacher Harness v3 强制以下接受条件：
 
 - `describe_schema` 每次最多 5 张表，返回结构化的列、类型、主键和外键；8 KiB 超限时按表分页并返回 `omitted_tables`，不会退化为只有哈希的摘要；
 - 每条轨迹必须至少成功描述一次 schema、至少成功执行一次 SQL；探索和最终提交均使用 10 秒上限；
@@ -161,6 +161,10 @@ Teacher Harness v2 额外强制以下接受条件：
 - 任意参数、工具、协议或执行错误都会使轨迹退出主 SFT 候选，即使模型随后纠正成功；
 - OpenAI-compatible 请求固定设置 `parallel_tool_calls=false`，确保原生 Function Calling 也遵守每轮一个 Action；
 - replay 会逐事件比较 Action 与 observation 的 `ok/error_code/payload/truncated`，仅忽略耗时，并核对最终 SQL、Reward 和数据库 SHA。
+
+Harness v3 根据 v2 的真实 20 条窗口诊断强化了模型可见 Prompt：要求单轮只调用一个函数、工具参数不得重复嵌套 `arguments`，并在写 SQL 前逐项核对问题语义、SQLite 方言和值域。工具、observation、SQL Guard、10 秒执行上限和严格 SFT 接受标准均未放宽。由于初始 Actor 消息已经变化，v2 的 8 条合格轨迹不会迁移或混入 v3 数据。
+
+Harness v3 已按固定采样前缀完成 100 条隐藏 Gold 离线预检：Train/Validation 为 90/10，简单/中等/挑战为 30/50/20，100 条全部通过，数据库 SHA 无变化。v2 的 8 条合格轨迹迁移检查全部因初始 Actor 消息变化而拒绝，符合单一 Harness 哈希要求。
 
 可用预生成 Action 做确定性 CPU 运行与回放：
 

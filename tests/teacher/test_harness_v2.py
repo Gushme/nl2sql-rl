@@ -213,6 +213,14 @@ async def test_protocol_rate_threshold_waits_for_twenty_attempts(tmp_path: Path)
     assert len(read_jsonl(tmp_path / "invalid.jsonl")) == 20
     assert summary["latest_diagnostics"]["rate_threshold_sample_ready"] is True
     assert summary["latest_diagnostics"]["invalid_text_action_responses"] > 0
+    assert (
+        summary["latest_diagnostics"]["context_token_semantics"]
+        == "max_qwen_chatml_before_request"
+    )
+    assert (
+        summary["latest_diagnostics"]["finish_reasons"]["missing_or_legacy"]
+        == summary["latest_diagnostics"]["response_calls"]
+    )
 
 
 @pytest.mark.asyncio
