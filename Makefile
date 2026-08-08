@@ -86,7 +86,7 @@ help:
 		'显式外部操作：' \
 		'  teacher-plan      离线生成分层采样配额，不调用 API' \
 		'  teacher-harness-preflight 用前 100 个 Gold 离线验证 Harness' \
-		'  teacher-probe     单次 Function Calling 探针；要求 CONFIRM=1' \
+		'  teacher-probe     单次 Action 兼容性探针；要求 CONFIRM=1' \
 		'  teacher-collect   真实 Teacher API；要求 CONFIRM=1 和预算上限' \
 		'  teacher-build-sft 构建 Action-only SFT 数据' \
 		'  sft-preflight     SFT 配置与数据预检' \

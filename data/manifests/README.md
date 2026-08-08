@@ -12,6 +12,8 @@
 - `leakage_report.json`：DB ID、数据库 SHA、task ID、标准化问题与近重复检查结果；本次全部为空。
 - `qwen_tokenizer_config.json`：固定模型 revision 的 tokenizer/config 文件哈希，明确无权重。
 - `verl_v0_8_0.json`：veRL release commit、AgentLoop 源码位置和 GPU 镜像 digest。
+- `teacher_harness_preflight_summary.json`：按真实分层顺序对前 100 条隐藏 Gold 做 Harness v2 离线预检的汇总。
+- `teacher_api_probe_summary.json`：真实 Teacher Action 兼容性探针的无密钥、无思考内容摘要与累计 Token 账本快照。
 
 完整的 Actor task、隐藏 answer、partial checkpoint 和运行缓存位于被 Git 忽略的
 `outputs/data/`。Train 清单可由 `nl2sql-rl data clean-train --resume` 重建；Dev 清单可由

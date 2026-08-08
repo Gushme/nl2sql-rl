@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_action_compatibility_probe",
+  "run_date": "2026-08-08",
+  "model": "deepseek-v4-flash-0731",
+  "model_api_called": true,
+  "requests": 1,
+  "normalized_action_valid": true,
+  "action": "list_tables",
+  "arguments_empty": true,
+  "response_format": "text_json",
+  "native_tool_call_used": false,
+  "normalization_error": null,
+  "thinking_enabled": true,
+  "reasoning_token_breakdown_present": true,
+  "reasoning_content_saved": false,
+  "usage": {
+    "input_tokens": 755,
+    "output_tokens": 28,
+    "reasoning_tokens": 15,
+    "action_tokens": 13,
+    "cached_input_tokens": 0,
+    "total_tokens": 783,
+    "latency_ms": 1116.5667499881238
+  },
+  "campaign": {
+    "attempts": 1,
+    "token_limit": 1000000,
+    "used_tokens": 783,
+    "remaining_tokens": 999217,
+    "cost_limit_usd": null,
+    "spent_usd": 0.0
+  },
+  "original_probe_rule": "native_tool_call_only",
+  "original_probe_ok": false,
+  "reassessment": "compatible_text_json_action",
+  "harness_changed": false,
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4",
+  "project_git_sha_at_request": "57ade0199e3d7ff367b1845398580dc93e5545d4"
+}

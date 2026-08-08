@@ -21,6 +21,8 @@ SQL 执行器是 EX 和 Reward 的唯一正确性裁判。LLM Judge 只评价 Ag
 
 Teacher 采集前的 Harness v2 离线 Gold 预检也已完成：按真实采样顺序取前 100 条，Train/Validation 为 90/10，简单/中等/挑战为 30/50/20，100 条全部通过 `describe_schema → execute_sql → submit_sql`，数据库 SHA256 全部不变。该结果不包含模型调用，也不代表 Teacher 合格率。
 
+真实 Teacher Action 兼容性探针已完成：模型以文本 JSON 返回合法 `list_tables` Action，thinking 与 token 明细正常，共使用 783 Token，未保存思考内容。该结果只证明 API 与 Action 协议兼容，不代表 NL2SQL 轨迹质量；完整摘要见 `data/manifests/teacher_api_probe_summary.json`。
+
 ## 1. Fresh clone
 
 CPU 开发环境固定使用 Python 3.11 和 uv。本项目额外兼容 Python 3.12，仅用于固定的 veRL GPU 容器；本机 Python 3.13 不作为运行环境。
@@ -186,7 +188,7 @@ make teacher-harness-preflight
 read -s TEACHER_API_KEY
 export TEACHER_API_KEY
 
-# 先发起恰好一次受保护的 Function Calling 探针。
+# 先发起恰好一次受保护的 Action 兼容性探针。
 CONFIRM=1 \
 TEACHER_ENDPOINT=https://provider.example/v1 \
 TEACHER_MODEL=deepseek-v4-flash-0731 \

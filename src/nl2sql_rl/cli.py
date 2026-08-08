@@ -601,7 +601,7 @@ def teacher_probe(
         "configs/project.yaml"
     ),
 ) -> None:
-    """执行一次受累计预算保护的 thinking + Function Calling 探针。"""
+    """执行一次受累计预算保护的 thinking + Action 兼容性探针。"""
     if not confirm_real_api:
         raise typer.BadParameter("真实 Teacher probe 必须显式设置 --confirm-real-api")
     if output.exists():

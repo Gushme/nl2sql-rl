@@ -1,4 +1,4 @@
-"""不执行数据库操作的最小 Function Calling 兼容性探针。"""
+"""不执行数据库操作的最小原生 tool call / 文本 JSON 兼容性探针。"""
 
 from __future__ import annotations
 
@@ -40,8 +40,6 @@ async def run_function_call_probe(client: ProbeClient) -> dict[str, Any]:
     error_code: str | None = None
     if not valid_action:
         error_code = "invalid_probe_action"
-    elif completion.response_format != "native_tool_call":
-        error_code = "native_tool_call_not_used"
     elif completion.reasoning_present and completion.reasoning_tokens is None:
         error_code = "reasoning_token_breakdown_missing"
     ok = error_code is None
@@ -52,6 +50,9 @@ async def run_function_call_probe(client: ProbeClient) -> dict[str, Any]:
         "response_id": completion.response_id,
         "action": action.model_dump(mode="json") if action is not None else None,
         "response_format": completion.response_format,
+        "native_tool_call_used": completion.response_format == "native_tool_call",
+        "compatible_action_transport": completion.response_format
+        in {"native_tool_call", "text_json"},
         "normalization_error": completion.normalization_error,
         "usage": {
             "input_tokens": completion.input_tokens,

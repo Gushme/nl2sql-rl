@@ -316,7 +316,7 @@ async def test_real_response_requires_token_usage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_function_probe_requires_native_call_and_reasoning_breakdown() -> None:
+async def test_function_probe_accepts_both_transports_and_requires_reasoning_breakdown() -> None:
     class ProbeClient:
         config_hash = "probe"
 
@@ -342,8 +342,10 @@ async def test_function_probe_requires_native_call_and_reasoning_breakdown() -> 
             )
         )
     )
-    assert text_report["ok"] is False
-    assert text_report["error_code"] == "native_tool_call_not_used"
+    assert text_report["ok"] is True
+    assert text_report["error_code"] is None
+    assert text_report["native_tool_call_used"] is False
+    assert text_report["compatible_action_transport"] is True
 
     missing_breakdown = await run_function_call_probe(
         ProbeClient(
