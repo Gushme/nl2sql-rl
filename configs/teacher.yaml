@@ -1,21 +1,29 @@
 schema_version: 1
 endpoint: https://teacher.example.com/v1
-model: replace-with-openai-compatible-model
+model: deepseek-v4-flash-0731
 concurrency: 4
 max_retries: 4
 retry_base_seconds: 0.5
-timeout_seconds: 60.0
-max_completion_tokens: 512
+timeout_seconds: 180.0
+max_completion_tokens: 8192
+normalized_action_token_limit: 512
 temperature: 0.0
 seed: 42
-input_price_per_million: 0.0
-output_price_per_million: 0.0
-max_request_cost_usd: 1.0
+enable_thinking: true
+reasoning_effort: high
+input_price_per_million: 0.16
+output_price_per_million: 0.32
+max_request_cost_usd: 0.01
 real_api: true
 collector:
   target_total: 1000
   train_quota: 900
   validation_quota: 100
   max_attempts: 1500
+  run_attempt_limit: 100
   concurrency: 4
+  seed: 42
+  simple_ratio: 0.30
+  moderate_ratio: 0.50
+  challenging_ratio: 0.20
   confirm_real_api: false

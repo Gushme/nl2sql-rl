@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import Field
@@ -87,8 +88,11 @@ class LLMClientConfig(StrictRecord):
     retry_base_seconds: float = Field(default=0.5, ge=0)
     timeout_seconds: float = Field(default=60.0, gt=0)
     max_completion_tokens: int = Field(default=512, ge=1)
+    normalized_action_token_limit: int = Field(default=512, ge=16)
     temperature: float = Field(default=0.0, ge=0)
     seed: int = 42
+    enable_thinking: bool = False
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     input_price_per_million: float = Field(default=0.0, ge=0)
     output_price_per_million: float = Field(default=0.0, ge=0)
     max_request_cost_usd: float = Field(default=1.0, gt=0)
@@ -97,6 +101,20 @@ class LLMClientConfig(StrictRecord):
     def fingerprint(self) -> str:
         encoded = stable_json(self.model_dump(mode="json")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def behavior_fingerprint(self) -> str:
+        """只哈希会改变模型输出分布或模型可见协议的配置。"""
+        payload = {
+            "endpoint": self.endpoint.rstrip("/"),
+            "model": self.model,
+            "max_completion_tokens": self.max_completion_tokens,
+            "normalized_action_token_limit": self.normalized_action_token_limit,
+            "temperature": self.temperature,
+            "seed": self.seed,
+            "enable_thinking": self.enable_thinking,
+            "reasoning_effort": self.reasoning_effort,
+        }
+        return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
 
 
 class TeacherAPIError(RuntimeError):
@@ -114,15 +132,28 @@ class LLMCompletion:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    reasoning_tokens: int | None = None
+    action_tokens: int | None = None
+    cached_input_tokens: int = 0
+    latency_ms: float = 0.0
+    finish_reason: str | None = None
 
 
 class CostLedger:
-    def __init__(self, cap_usd: float, reservation_usd: float) -> None:
+    def __init__(
+        self,
+        cap_usd: float,
+        reservation_usd: float,
+        *,
+        initial_spent_usd: float = 0.0,
+    ) -> None:
         if cap_usd <= 0:
             raise ValueError("Teacher 费用上限必须大于 0")
+        if initial_spent_usd < 0 or initial_spent_usd > cap_usd + 1e-12:
+            raise ValueError("Teacher 历史费用必须位于 0 到费用上限之间")
         self.cap_usd = cap_usd
         self.reservation_usd = reservation_usd
-        self.spent_usd = 0.0
+        self.spent_usd = initial_spent_usd
         self.reserved_usd = 0.0
         self._lock = asyncio.Lock()
 
@@ -198,11 +229,16 @@ class LLMClient:
         *,
         api_key: str,
         cost_limit_usd: float,
+        initial_spent_usd: float = 0.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.config = config
         self._semaphore = asyncio.Semaphore(config.concurrency)
-        self._ledger = CostLedger(cost_limit_usd, config.max_request_cost_usd)
+        self._ledger = CostLedger(
+            cost_limit_usd,
+            config.max_request_cost_usd,
+            initial_spent_usd=initial_spent_usd,
+        )
         self._client = httpx.AsyncClient(
             base_url=config.endpoint.rstrip("/") + "/",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -213,6 +249,10 @@ class LLMClient:
     @property
     def config_hash(self) -> str:
         return self.config.fingerprint()
+
+    @property
+    def behavior_config_hash(self) -> str:
+        return self.config.behavior_fingerprint()
 
     @property
     def real_api(self) -> bool:
@@ -245,6 +285,7 @@ class LLMClient:
     ) -> LLMCompletion:
         await self._ledger.reserve()
         settled = False
+        started = time.monotonic()
         try:
             async with self._semaphore:
                 payload = {
@@ -256,6 +297,10 @@ class LLMClient:
                     "seed": self.config.seed,
                     "max_tokens": max_tokens or self.config.max_completion_tokens,
                 }
+                if self.config.enable_thinking:
+                    payload["enable_thinking"] = True
+                if self.config.reasoning_effort is not None:
+                    payload["reasoning_effort"] = self.config.reasoning_effort
                 response: httpx.Response | None = None
                 for attempt in range(self.config.max_retries + 1):
                     try:
@@ -288,11 +333,40 @@ class LLMClient:
                 first = choices[0]
                 if not isinstance(first, dict) or not isinstance(first.get("message"), dict):
                     raise TeacherAPIError("Teacher choice.message 不合法")
-                action = _normalize_choice(first["message"])
+                message = first["message"]
+                action = _normalize_choice(message)
+                # reasoning_content 可能很长；只读取存在性，绝不写入返回值或后续消息。
+                has_reasoning = bool(message.get("reasoning_content"))
                 usage_value = raw.get("usage")
                 usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
                 input_tokens = int(usage.get("prompt_tokens", 0))
                 output_tokens = int(usage.get("completion_tokens", 0))
+                completion_details_value = usage.get(
+                    "completion_tokens_details", usage.get("output_tokens_details")
+                )
+                completion_details = (
+                    completion_details_value
+                    if isinstance(completion_details_value, dict)
+                    else {}
+                )
+                prompt_details_value = usage.get(
+                    "prompt_tokens_details", usage.get("input_tokens_details")
+                )
+                prompt_details = (
+                    prompt_details_value if isinstance(prompt_details_value, dict) else {}
+                )
+                reasoning_value = completion_details.get("reasoning_tokens")
+                reasoning_tokens = (
+                    int(reasoning_value) if reasoning_value is not None else None
+                )
+                if reasoning_tokens is not None and reasoning_tokens > output_tokens:
+                    raise TeacherAPIError("reasoning_tokens 大于 completion_tokens")
+                action_tokens = (
+                    output_tokens - reasoning_tokens
+                    if reasoning_tokens is not None
+                    else (output_tokens if not has_reasoning else None)
+                )
+                cached_input_tokens = int(prompt_details.get("cached_tokens", 0))
                 cost = self._cost(input_tokens, output_tokens)
                 await self._ledger.settle(cost)
                 settled = True
@@ -302,6 +376,15 @@ class LLMClient:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cost_usd=cost,
+                    reasoning_tokens=reasoning_tokens,
+                    action_tokens=action_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    latency_ms=(time.monotonic() - started) * 1000,
+                    finish_reason=(
+                        str(first["finish_reason"])
+                        if first.get("finish_reason") is not None
+                        else None
+                    ),
                 )
         finally:
             if not settled:

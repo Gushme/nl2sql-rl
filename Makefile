@@ -20,19 +20,21 @@ TEACHER_ANSWERS ?= outputs/data/splits/answers/teacher_pool.jsonl
 TEACHER_DB_ROOT ?= train
 TEACHER_ATTEMPTS ?= outputs/teacher/attempts.jsonl
 TEACHER_SUMMARY ?= outputs/teacher/summary.json
+TEACHER_PLAN ?= outputs/teacher/sampling_plan.json
 E2E_OUTPUT ?= outputs/cpu_e2e/make-$(shell date +%Y%m%d-%H%M%S)
 
 CONFIRM ?= 0
 TEACHER_ENDPOINT ?=
-TEACHER_MODEL ?=
+TEACHER_MODEL ?= deepseek-v4-flash-0731
 TEACHER_COST_LIMIT_USD ?=
-TEACHER_INPUT_PRICE_PER_MILLION ?= 0
-TEACHER_OUTPUT_PRICE_PER_MILLION ?= 0
-TEACHER_MAX_REQUEST_COST_USD ?= 1
+TEACHER_INPUT_PRICE_PER_MILLION ?= 0.16
+TEACHER_OUTPUT_PRICE_PER_MILLION ?= 0.32
+TEACHER_MAX_REQUEST_COST_USD ?= 0.01
 TEACHER_TARGET_TOTAL ?= 1000
 TEACHER_TRAIN_QUOTA ?= 900
 TEACHER_VALIDATION_QUOTA ?= 100
 TEACHER_MAX_ATTEMPTS ?= 1500
+TEACHER_RUN_ATTEMPT_LIMIT ?= 100
 TEACHER_CONCURRENCY ?= 4
 
 SFT_ADAPTER ?= checkpoints/sft/final_adapter
@@ -52,7 +54,7 @@ EVAL_ROOT = $(EVALUATION_ROOT)/$(EVAL_LABEL)
 
 .PHONY: help setup lint typecheck test test-full build check
 .PHONY: data-train data-dev-local data-split data-all cpu-e2e pipeline-cpu
-.PHONY: teacher-collect teacher-build-sft sft-preflight sft-run sft-export
+.PHONY: teacher-plan teacher-collect teacher-build-sft sft-preflight sft-run sft-export
 .PHONY: grpo-preflight grpo-run eval-base eval-sft eval-grpo eval-compare
 .PHONY: guard-confirm guard-teacher guard-eval _eval-model
 
@@ -75,6 +77,7 @@ help:
 		'  pipeline-cpu      串联 check、data-all 和 cpu-e2e' \
 		'' \
 		'显式外部操作：' \
+		'  teacher-plan      离线生成分层采样配额，不调用 API' \
 		'  teacher-collect   真实 Teacher API；要求 CONFIRM=1 和费用上限' \
 		'  teacher-build-sft 构建 Action-only SFT 数据' \
 		'  sft-preflight     SFT 配置与数据预检' \
@@ -137,6 +140,15 @@ guard-teacher: guard-confirm
 	@if [[ -z "$(TEACHER_MODEL)" ]]; then echo "拒绝执行：TEACHER_MODEL 未设置"; exit 2; fi
 	@if [[ -z "$(TEACHER_COST_LIMIT_USD)" ]]; then echo "拒绝执行：TEACHER_COST_LIMIT_USD 必须显式设置"; exit 2; fi
 
+teacher-plan:
+	$(CLI) teacher plan \
+		--tasks "$(TEACHER_TASKS)" \
+		--answers "$(TEACHER_ANSWERS)" \
+		--output "$(TEACHER_PLAN)" \
+		--target-total "$(TEACHER_TARGET_TOTAL)" \
+		--train-quota "$(TEACHER_TRAIN_QUOTA)" \
+		--validation-quota "$(TEACHER_VALIDATION_QUOTA)"
+
 teacher-collect: guard-teacher
 	$(CLI) teacher collect \
 		--tasks "$(TEACHER_TASKS)" \
@@ -154,6 +166,7 @@ teacher-collect: guard-teacher
 		--train-quota "$(TEACHER_TRAIN_QUOTA)" \
 		--validation-quota "$(TEACHER_VALIDATION_QUOTA)" \
 		--max-attempts "$(TEACHER_MAX_ATTEMPTS)" \
+		--run-attempt-limit "$(TEACHER_RUN_ATTEMPT_LIMIT)" \
 		--concurrency "$(TEACHER_CONCURRENCY)" \
 		--confirm-real-api
 

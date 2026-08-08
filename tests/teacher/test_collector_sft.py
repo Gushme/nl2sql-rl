@@ -30,7 +30,7 @@ class FakeTeacherClient:
     async def complete_action(
         self, messages: list[dict[str, Any]], *, max_tokens: int | None = None
     ) -> LLMCompletion:
-        assert messages and max_tokens
+        assert messages and max_tokens is None
         self.calls += 1
         return LLMCompletion(
             action=AgentAction(
@@ -93,7 +93,11 @@ async def test_collector_resumes_without_duplicate_requests_and_builds_sft(
         train_quota=1,
         validation_quota=1,
         max_attempts=2,
+        run_attempt_limit=2,
         concurrency=2,
+        simple_ratio=1.0,
+        moderate_ratio=0.0,
+        challenging_ratio=0.0,
     )
     first = await collect_trajectories(
         tasks,
@@ -163,5 +167,9 @@ async def test_real_api_requires_explicit_confirmation(tmp_path: Path) -> None:
                 train_quota=1,
                 validation_quota=1,
                 max_attempts=2,
+                run_attempt_limit=2,
+                simple_ratio=1.0,
+                moderate_ratio=0.0,
+                challenging_ratio=0.0,
             ),
         )

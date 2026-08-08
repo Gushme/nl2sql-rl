@@ -91,6 +91,66 @@ async def test_client_normalizes_native_tool_call_and_text_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thinking_is_requested_accounted_and_not_returned() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["enable_thinking"] is True
+        assert payload["reasoning_effort"] == "high"
+        assert payload["max_tokens"] == 8_192
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "thinking_1",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "reasoning_content": "不会进入轨迹",
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "list_tables",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 80,
+                    "prompt_tokens_details": {"cached_tokens": 20},
+                    "completion_tokens_details": {"reasoning_tokens": 70},
+                },
+            },
+        )
+
+    config = _config(
+        enable_thinking=True,
+        reasoning_effort="high",
+        max_completion_tokens=8_192,
+    )
+    async with LLMClient(
+        config,
+        api_key="mock",
+        cost_limit_usd=1.0,
+        initial_spent_usd=0.25,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        completion = await client.complete_action([])
+        assert completion.reasoning_tokens == 70
+        assert completion.action_tokens == 10
+        assert completion.cached_input_tokens == 20
+        assert completion.finish_reason == "tool_calls"
+        assert not hasattr(completion, "reasoning_content")
+        assert client.spent_usd == pytest.approx(0.25026)
+
+
+@pytest.mark.asyncio
 async def test_client_retries_429_5xx_and_timeout() -> None:
     outcomes: list[int | str] = [429, 500, "timeout", 200]
 

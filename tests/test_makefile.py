@@ -25,6 +25,7 @@ PUBLIC_TARGETS = {
     "data-all",
     "cpu-e2e",
     "pipeline-cpu",
+    "teacher-plan",
     "teacher-collect",
     "teacher-build-sft",
     "sft-preflight",

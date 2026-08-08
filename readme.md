@@ -158,7 +158,15 @@ uv run nl2sql-rl agent replay \
 
 ## 4. Teacher 轨迹与 SFT 数据
 
-真实 Teacher 默认目标是 1,000 条最终 EX 正确且协议安全的轨迹：900 train、100 validation，最多 1,500 次尝试，并发 4。真实请求必须同时提供 API key、费用上限和显式确认。
+真实 Teacher 默认目标是 1,000 条最终 EX 正确且协议安全的轨迹：900 train、100 validation，复杂度固定为简单 30%、中等 50%、挑战 20%。采样器先按数据库候选量的平方根分配配额，再用 Gold SQL AST 做交叉分层；桶内顺序由 seed 42 和 task ID 的 SHA256 固定。整个活动最多 1,500 次尝试，每次运行默认只推进 100 次，便于在批次边界检查 Harness。
+
+先离线生成配额清单，不会调用 API：
+
+```bash
+make teacher-plan
+```
+
+真实请求必须同时提供轮换后的 API key、费用上限和显式确认。`reasoning_content` 只在响应解析期间读取，绝不保存或回传；思考 token 仍计入输出费用。下面的 endpoint 必须通过参数或 Make 变量注入，不写入仓库：
 
 ```bash
 export TEACHER_API_KEY=...
@@ -168,15 +176,18 @@ uv run nl2sql-rl teacher collect \
   --answers outputs/data/splits/answers/teacher_pool.jsonl \
   --db-root train \
   --endpoint https://provider.example/v1 \
-  --model teacher-model \
+  --model deepseek-v4-flash-0731 \
   --cost-limit-usd 20 \
-  --input-price-per-million 1.0 \
-  --output-price-per-million 2.0 \
-  --max-request-cost-usd 0.10 \
+  --input-price-per-million 0.16 \
+  --output-price-per-million 0.32 \
+  --max-request-cost-usd 0.01 \
+  --run-attempt-limit 100 \
+  --enable-thinking \
+  --reasoning-effort high \
   --confirm-real-api
 ```
 
-采集器按 task 幂等、断点续采，处理 429、5xx 和超时，且不会保存隐藏 CoT。把合格轨迹转换为 SFT 对话：
+采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时；累计尝试数与累计费用不会因再次运行而重置。把合格轨迹转换为 SFT 对话：
 
 ```bash
 uv run nl2sql-rl teacher build-sft \

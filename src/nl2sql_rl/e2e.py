@@ -59,8 +59,7 @@ class _MockActionClient:
     async def complete_action(
         self, messages: list[dict[str, Any]], *, max_tokens: int | None = None
     ) -> LLMCompletion:
-        if max_tokens is None:
-            raise ValueError("mock action 必须收到 token 上限")
+        del max_tokens
         self.calls += 1
         action = (
             AgentAction(
@@ -180,7 +179,11 @@ async def _run_async_components(
             train_quota=1,
             validation_quota=1,
             max_attempts=2,
+            run_attempt_limit=2,
             concurrency=2,
+            simple_ratio=1.0,
+            moderate_ratio=0.0,
+            challenging_ratio=0.0,
         ),
     )
     attempts = [

@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 import typer
 
@@ -33,7 +33,13 @@ from nl2sql_rl.models import (
     TaskView,
 )
 from nl2sql_rl.teacher.client import LLMClient, LLMClientConfig
-from nl2sql_rl.teacher.collector import CollectorConfig, TeacherAttempt, collect_trajectories
+from nl2sql_rl.teacher.collector import (
+    CollectorConfig,
+    TeacherAttempt,
+    collect_trajectories,
+    historical_cost_usd,
+)
+from nl2sql_rl.teacher.sampling import build_sampling_plan
 from nl2sql_rl.training.grpo import (
     build_verl_command,
     load_grpo_config,
@@ -515,6 +521,47 @@ def eval_compare(
     typer.echo(json.dumps({"output": str(output), "final_n": len(runs["base"])}, indent=2))
 
 
+@teacher_app.command("plan")
+def teacher_plan(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answers: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/sampling_plan.json"
+    ),
+    target_total: Annotated[int, typer.Option(min=1)] = 1_000,
+    train_quota: Annotated[int, typer.Option(min=0)] = 900,
+    validation_quota: Annotated[int, typer.Option(min=0)] = 100,
+    seed: int = 42,
+    simple_ratio: Annotated[float, typer.Option(min=0)] = 0.30,
+    moderate_ratio: Annotated[float, typer.Option(min=0)] = 0.50,
+    challenging_ratio: Annotated[float, typer.Option(min=0)] = 0.20,
+) -> None:
+    """不调用 API，生成数据库与 SQL 复杂度交叉配额。"""
+    collector = CollectorConfig(
+        target_total=target_total,
+        train_quota=train_quota,
+        validation_quota=validation_quota,
+        max_attempts=max(target_total, 1_500),
+        seed=seed,
+        simple_ratio=simple_ratio,
+        moderate_ratio=moderate_ratio,
+        challenging_ratio=challenging_ratio,
+    )
+    collector.validate_quotas()
+    task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
+    answer_rows = [HiddenAnswer.model_validate(row) for row in read_jsonl(answers)]
+    plan = build_sampling_plan(
+        task_rows,
+        answer_rows,
+        split_targets={"train": train_quota, "validation": validation_quota},
+        complexity_weights=collector.complexity_weights(),
+        seed=seed,
+    )
+    manifest = plan.manifest()
+    write_json(output, manifest)
+    typer.echo(json.dumps(manifest, indent=2, sort_keys=True))
+
+
 @teacher_app.command("collect")
 def teacher_collect(
     tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
@@ -536,7 +583,20 @@ def teacher_collect(
     train_quota: Annotated[int, typer.Option(min=0)] = 900,
     validation_quota: Annotated[int, typer.Option(min=0)] = 100,
     max_attempts: Annotated[int, typer.Option(min=1)] = 1_500,
+    run_attempt_limit: Annotated[int, typer.Option(min=1)] = 100,
     concurrency: Annotated[int, typer.Option(min=1, max=32)] = 4,
+    seed: int = 42,
+    simple_ratio: Annotated[float, typer.Option(min=0)] = 0.30,
+    moderate_ratio: Annotated[float, typer.Option(min=0)] = 0.50,
+    challenging_ratio: Annotated[float, typer.Option(min=0)] = 0.20,
+    enable_thinking: Annotated[
+        bool, typer.Option("--enable-thinking/--disable-thinking")
+    ] = True,
+    reasoning_effort: str = "high",
+    max_completion_tokens: Annotated[int, typer.Option(min=1)] = 8_192,
+    normalized_action_token_limit: Annotated[int, typer.Option(min=16)] = 512,
+    api_timeout_seconds: Annotated[float, typer.Option(min=0.001)] = 180.0,
+    max_retries: Annotated[int, typer.Option(min=0, max=10)] = 4,
     input_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
     output_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
     max_request_cost_usd: Annotated[float, typer.Option(min=0.000001)] = 1.0,
@@ -546,6 +606,8 @@ def teacher_collect(
 ) -> None:
     """采集合格 Teacher 轨迹；真实 API 需要费用上限和显式确认。"""
     project = load_project_config(config)
+    if reasoning_effort not in {"low", "medium", "high"}:
+        raise typer.BadParameter("reasoning_effort 必须是 low、medium 或 high")
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise typer.BadParameter(f"环境变量 {api_key_env} 未设置")
@@ -555,6 +617,14 @@ def teacher_collect(
         endpoint=endpoint,
         model=model,
         concurrency=concurrency,
+        max_retries=max_retries,
+        timeout_seconds=api_timeout_seconds,
+        max_completion_tokens=max_completion_tokens,
+        normalized_action_token_limit=normalized_action_token_limit,
+        temperature=0.0,
+        seed=seed,
+        enable_thinking=enable_thinking,
+        reasoning_effort=cast(Literal["low", "medium", "high"], reasoning_effort),
         input_price_per_million=input_price_per_million,
         output_price_per_million=output_price_per_million,
         max_request_cost_usd=max_request_cost_usd,
@@ -565,7 +635,12 @@ def teacher_collect(
         train_quota=train_quota,
         validation_quota=validation_quota,
         max_attempts=max_attempts,
+        run_attempt_limit=run_attempt_limit,
         concurrency=concurrency,
+        seed=seed,
+        simple_ratio=simple_ratio,
+        moderate_ratio=moderate_ratio,
+        challenging_ratio=challenging_ratio,
         confirm_real_api=confirm_real_api,
     )
 
@@ -574,6 +649,7 @@ def teacher_collect(
             client_config,
             api_key=api_key,
             cost_limit_usd=cost_limit_usd,
+            initial_spent_usd=historical_cost_usd(output),
         ) as client:
             return await collect_trajectories(
                 task_rows,
