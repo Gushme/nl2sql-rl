@@ -11,6 +11,8 @@ temperature: 0.0
 seed: 42
 enable_thinking: true
 reasoning_effort: high
+# 单步 Agent 协议禁止服务端在同一轮并行返回多个工具调用。
+parallel_tool_calls: false
 # 可优先设置累计 Token 硬上限；如需美元费用报告，再从控制台读取真实单价。
 token_limit: null
 input_price_per_million: 0.0

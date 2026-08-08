@@ -31,6 +31,7 @@ class LLMClientConfig(StrictRecord):
     seed: int = 42
     enable_thinking: bool = False
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    parallel_tool_calls: Literal[False] = False
     input_price_per_million: float = Field(default=0.0, ge=0)
     output_price_per_million: float = Field(default=0.0, ge=0)
     max_request_cost_usd: float = Field(default=1.0, gt=0)
@@ -51,6 +52,7 @@ class LLMClientConfig(StrictRecord):
             "seed": self.seed,
             "enable_thinking": self.enable_thinking,
             "reasoning_effort": self.reasoning_effort,
+            "parallel_tool_calls": self.parallel_tool_calls,
         }
         return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
 
@@ -445,6 +447,7 @@ class LLMClient:
                     "messages": api_compatible_messages(messages),
                     "tools": ACTION_TOOLS,
                     "tool_choice": "auto",
+                    "parallel_tool_calls": self.config.parallel_tool_calls,
                     "temperature": self.config.temperature,
                     "seed": self.config.seed,
                     "max_tokens": max_tokens or self.config.max_completion_tokens,

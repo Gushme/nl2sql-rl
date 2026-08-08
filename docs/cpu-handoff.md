@@ -19,9 +19,10 @@
 - Teacher Harness v2 已用计划前缀 100 条隐藏 Gold 做离线预检：90 条 Train、10 条 Validation，复杂度为 30/50/20，100 条全部通过，数据库 SHA256 全部不变；1 次 schema 分页仍保留结构化列信息。
 - 实测 5 秒探索上限会让预检中的一条 Gold 偶发超时，因此在任何付费请求前把 `execute_sql` 探索上限调整为 10 秒，并写入新的 Harness 配置哈希 `b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4`。
 - 真实 Teacher Action 兼容性探针已完成：鉴权、thinking、reasoning token 明细和严格 JSON Action 均正常；模型以文本 JSON 返回合法 `list_tables` Action，共使用 783 Token，未保存思考内容。原先“必须原生 tool call”的探针判据与项目同时支持两种 Action 传输格式的协议不一致，已修正；模型可见 Harness 未改变。
+- 真实 Pilot transport v1 在 4 条任务后自动暂停：1 条合格，23 次响应中 2 次并行返回两个原生 tool call，累计使用 63,479 Token；schema 无截断、8 次 SQL 探索无超时或 SQLite 错误。客户端已固定 `parallel_tool_calls=false`，并将以新 Teacher 行为哈希和独立输出目录迁移唯一合格轨迹后续采。
 
 权威机器可读结果见 `data/manifests/` 下的 Train/Dev inventory、审计 summary、
-`split_manifest.json`、`leakage_report.json`、Teacher 预检/探针摘要和模型依赖清单。
+`split_manifest.json`、`leakage_report.json`、Teacher 预检/Pilot 摘要和模型依赖清单。
 
 ## Dev 数据恢复命令
 
@@ -37,7 +38,7 @@ uv run nl2sql-rl data split
 
 ## 本轮未执行
 
-- 100 次真实 Teacher Pilot 与 1,000 条轨迹采集；
+- 完整 100 次真实 Teacher Pilot 与 1,000 条轨迹采集；
 - Base、SFT、GRPO 模型推理；
 - GPU SFT、checkpoint 合并和 GPU GRPO；
 - LLM 行为 Judge。

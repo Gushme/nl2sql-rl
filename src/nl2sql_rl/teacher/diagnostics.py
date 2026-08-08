@@ -243,6 +243,7 @@ def diagnose_attempts(
     attempts_with_tool_error = 0
     corrected_final_results = 0
     normalization_failures = 0
+    multiple_native_tool_call_responses = 0
     native_tool_calls = 0
     text_json_calls = 0
     response_calls = 0
@@ -284,6 +285,9 @@ def diagnose_attempts(
         for event in episode.events:
             if event.action is None:
                 protocol_attempt = True
+                message = event.observation.payload.get("message")
+                if isinstance(message, str) and "native_tool_call_count" in message:
+                    multiple_native_tool_call_responses += 1
             else:
                 tool_distribution[event.action.action] += 1
                 current_action = normalized_action(event.action)
@@ -465,6 +469,7 @@ def diagnose_attempts(
         "invalid_argument_attempts": invalid_argument_attempts,
         "protocol_or_argument_attempts": protocol_or_argument_attempts,
         "normalization_failures": normalization_failures,
+        "multiple_native_tool_call_responses": multiple_native_tool_call_responses,
         "native_tool_calls": native_tool_calls,
         "text_json_calls": text_json_calls,
         "response_calls": response_calls,

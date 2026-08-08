@@ -118,7 +118,9 @@ async def test_client_normalizes_native_tool_call_and_text_json() -> None:
         nonlocal calls
         calls += 1
         assert request.read()
-        assert json.loads(request.content)["seed"] == 42
+        payload = json.loads(request.content)
+        assert payload["seed"] == 42
+        assert payload["parallel_tool_calls"] is False
         if calls == 1:
             return _response(request, tool_call=True)
         return _response(
@@ -267,6 +269,38 @@ async def test_invalid_native_tool_call_becomes_protocol_input_not_api_failure()
     assert "unknown_tool" in completion.action_text
     assert completion.normalization_error is not None
     assert completion.response_format == "native_tool_call"
+
+
+@pytest.mark.asyncio
+async def test_multiple_native_tool_calls_are_rejected_as_one_step_protocol_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["parallel_tool_calls"] is False
+        call = {
+            "type": "function",
+            "function": {"name": "list_tables", "arguments": "{}"},
+        }
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "parallel_1",
+                "choices": [
+                    {"message": {"content": None, "tool_calls": [call, call]}}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    async with LLMClient(
+        _config(),
+        api_key="mock",
+        cost_limit_usd=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        completion = await client.complete_action([])
+    assert completion.action is None
+    assert completion.action_text == '{"native_tool_call_count":2}'
+    assert completion.normalization_error == "每轮只允许一个原生 tool_call"
 
 
 @pytest.mark.asyncio

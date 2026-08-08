@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_pilot_transport_v1_partial",
+  "run_date": "2026-08-08",
+  "model": "deepseek-v4-flash-0731",
+  "project_git_sha_at_request": "a112711f968f004b5d2074063762e0cde46a93ae",
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4",
+  "teacher_behavior_hash": "660f1208fab8783080d1f9b4c36042e23689aa64612e7c2d4558fb199a8c797d",
+  "collection_config_hash": "896cb04f5301b07328b80f2790e1c30f4f8ed6664beb960eff431d926cb4eec6",
+  "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
+  "task_attempts": 4,
+  "campaign_attempts_including_probe": 5,
+  "accepted": 1,
+  "acceptance_rate": 0.25,
+  "attempted_by_split": {
+    "train": 4,
+    "validation": 0
+  },
+  "attempted_by_complexity": {
+    "simple": 1,
+    "moderate": 2,
+    "challenging": 1
+  },
+  "accepted_by_complexity": {
+    "challenging": 1
+  },
+  "rejection_reasons": {
+    "execution_not_correct": 3
+  },
+  "responses": {
+    "total": 23,
+    "native_tool_call": 11,
+    "text_json": 12,
+    "normalization_failed": 2,
+    "multiple_native_tool_calls": 2
+  },
+  "harness_metrics": {
+    "schema_calls": 4,
+    "schema_without_columns": 0,
+    "schema_truncated": 0,
+    "execute_sql_calls": 8,
+    "execute_sql_timeouts": 0,
+    "execute_sqlite_errors": 0,
+    "unverified_submissions": 0,
+    "infrastructure_errors": 0
+  },
+  "token_usage": {
+    "pilot_input_tokens": 45182,
+    "pilot_output_tokens": 17514,
+    "pilot_reasoning_tokens": 15975,
+    "pilot_total_tokens": 62696,
+    "campaign_total_tokens": 63479,
+    "campaign_token_limit": 1000000,
+    "campaign_remaining_tokens": 936521
+  },
+  "paused": true,
+  "pause_reasons": [
+    "protocol_or_argument_error_rate_gt_5pct"
+  ],
+  "diagnosis": "provider_returned_two_native_tool_calls_in_one_agent_step",
+  "remediation": "set_parallel_tool_calls_false",
+  "model_visible_harness_changed": false,
+  "accepted_trajectories_eligible_for_migration": 1,
+  "reasoning_content_saved": false
+}

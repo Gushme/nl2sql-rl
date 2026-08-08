@@ -410,6 +410,7 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
     assert state.attempts == 2
     assert state.sampling_manifest_hash == "sampling-v1"
     assert state.teacher_behavior_hash == "teacher-v1"
+    assert state.teacher_behavior_hashes == ["teacher-v1"]
     assert state.pricing_hash == "pricing-v1"
     assert state.used_tokens == 90
     first_episode_id = TeacherAttempt.model_validate(
@@ -472,6 +473,20 @@ def test_campaign_state_counts_attempts_once_and_freezes_limits(tmp_path: Path) 
             cost_limit_usd=20.0,
             token_limit=999,
         )
+    upgraded = prepare_campaign_state(
+        state_path,
+        attempt_paths=[attempts_path],
+        target_total=2,
+        max_attempts=2,
+        cost_limit_usd=20.0,
+        token_limit=1_000,
+        teacher_behavior_hash="teacher-v2",
+        allow_teacher_behavior_upgrade=True,
+    )
+    assert upgraded.teacher_behavior_hash == "teacher-v2"
+    assert upgraded.teacher_behavior_hashes == ["teacher-v1", "teacher-v2"]
+    assert upgraded.attempts == state.attempts
+    assert upgraded.used_tokens == state.used_tokens
 
 
 def test_campaign_state_supports_token_only_budget(tmp_path: Path) -> None:

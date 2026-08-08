@@ -915,6 +915,7 @@ def teacher_collect(
         sampling_manifest_hash=sampling_plan.manifest_hash,
         teacher_behavior_hash=client_config.behavior_fingerprint(),
         pricing_hash=client_config.pricing_fingerprint(),
+        allow_teacher_behavior_upgrade=migrate_from is not None,
     )
     async def run() -> dict[str, object]:
         async with LLMClient(

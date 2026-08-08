@@ -23,6 +23,8 @@ Teacher 采集前的 Harness v2 离线 Gold 预检也已完成：按真实采样
 
 真实 Teacher Action 兼容性探针已完成：模型以文本 JSON 返回合法 `list_tables` Action，thinking 与 token 明细正常，共使用 783 Token，未保存思考内容。该结果只证明 API 与 Action 协议兼容，不代表 NL2SQL 轨迹质量；完整摘要见 `data/manifests/teacher_api_probe_summary.json`。
 
+首个真实 Pilot 小批次在 4 条任务后按协议错误阈值自动暂停：1 条合格，23 次模型响应中有 2 次在同一轮返回两个原生 tool call；schema、SQL 执行、超时与数据库基础设施均正常。该问题通过显式禁用并行 tool call 修正，模型可见 Prompt、工具与 observation 未改变；旧版唯一合格轨迹会在新行为配置下确定性重放后迁移。脱敏证据见 `data/manifests/teacher_pilot_transport_v1_summary.json`。
+
 ## 1. Fresh clone
 
 CPU 开发环境固定使用 Python 3.11 和 uv。本项目额外兼容 Python 3.12，仅用于固定的 veRL GPU 容器；本机 Python 3.13 不作为运行环境。
@@ -151,6 +153,7 @@ Teacher Harness v2 额外强制以下接受条件：
 - 每条轨迹必须至少成功描述一次 schema、至少成功执行一次 SQL；探索和最终提交均使用 10 秒上限；
 - `submit_sql` 必须与最后一次成功 `execute_sql` 经 sqlglot 规范化后相同，并且最终 SQL 的所有物理表都已成功描述；
 - 任意参数、工具、协议或执行错误都会使轨迹退出主 SFT 候选，即使模型随后纠正成功；
+- OpenAI-compatible 请求固定设置 `parallel_tool_calls=false`，确保原生 Function Calling 也遵守每轮一个 Action；
 - replay 会逐事件比较 Action 与 observation 的 `ok/error_code/payload/truncated`，仅忽略耗时，并核对最终 SQL、Reward 和数据库 SHA。
 
 可用预生成 Action 做确定性 CPU 运行与回放：
@@ -210,7 +213,7 @@ uv run nl2sql-rl teacher collect \
 
 采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时。活动账本 `campaign_state.json` 跨运行、跨 Harness 版本累计探针与正式请求，1,500 次尝试、Token 上限和可选费用上限都不会因升级或续采重置。每 100 次尝试冻结一个诊断批次；协议/参数错误、schema 信息丢失、超时、上下文溢出、循环、replay 不一致、数据库 SHA 改变、预算耗尽或系统性 API 异常达到门槛时会自动停止后续请求。
 
-如果模型可见 Prompt、工具 schema、observation、超时、SQL Guard 或接受标准变化，必须使用新的 Harness 哈希和输出文件。旧轨迹只有在初始 Actor 消息、可见协议、逐事件 observation、最终 SQL、Reward 和数据库 SHA 全部一致时才能迁移；否则任务回到原分层队列重新采集。最终 SFT 只接受一个 Harness 配置哈希。
+如果模型可见 Prompt、工具 schema、observation、超时、SQL Guard 或接受标准变化，必须使用新的 Harness 哈希和输出文件；Teacher 请求行为变化也必须生成新的采集配置哈希和输出文件。旧轨迹只有在初始 Actor 消息、可见协议、逐事件 observation、最终 SQL、Reward 和数据库 SHA 全部一致时才能迁移；否则任务回到原分层队列重新采集。活动账本保留所有 Teacher 行为哈希，并累计旧版本的尝试与 Token。最终 SFT 只接受一个采集配置哈希。
 
 把 1,000 条合格轨迹转换为 SFT 对话：
 
