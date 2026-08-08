@@ -49,6 +49,8 @@ _DENIED_AUTHORIZER_ACTIONS = {
     if hasattr(sqlite3, name)
 }
 
+SQL_GUARD_VERSION = "sqlite-readonly-v2"
+
 
 class UnsafeSQLError(ValueError):
     """SQL 不是单条只读查询时，在执行前抛出。"""

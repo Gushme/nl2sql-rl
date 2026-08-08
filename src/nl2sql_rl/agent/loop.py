@@ -11,9 +11,10 @@ from typing import Any, Protocol
 
 from nl2sql_rl.agent.parser import ActionParseError, normalized_action, parse_action
 from nl2sql_rl.agent.reward import score_terminal
+from nl2sql_rl.agent.spec import SYSTEM_PROMPT
 from nl2sql_rl.agent.tools import SQLiteToolbox
 from nl2sql_rl.config import RuntimeConfig
-from nl2sql_rl.io_utils import stable_json
+from nl2sql_rl.io_utils import sha256_file, stable_json
 from nl2sql_rl.models import (
     AgentAction,
     AuditStatus,
@@ -25,11 +26,6 @@ from nl2sql_rl.models import (
     TrajectoryEvent,
 )
 from nl2sql_rl.sqlite_exec import execute_read_only
-
-SYSTEM_PROMPT = """你是一个 SQLite NL2SQL Agent。每一轮只输出一个 JSON 对象：
-{"action":"工具名","arguments":{...}}
-工具仅允许 list_tables、describe_schema、search_values、execute_sql、submit_sql。
-先检查 schema，必要时执行候选 SQL；确认后用 submit_sql 结束。不要输出 Markdown 或解释。"""
 
 
 @dataclass(frozen=True)
@@ -114,6 +110,8 @@ def run_episode(
     runtime: RuntimeConfig,
     config_hash: str,
     episode_id: str | None = None,
+    expected_database_sha256: str | None = None,
+    verify_database_sha: bool = True,
 ) -> EpisodeResult:
     if task.task_id != answer.task_id:
         raise ValueError("TaskView 与 HiddenAnswer 的 task_id 不一致")
@@ -123,6 +121,8 @@ def run_episode(
     usage: dict[str, int] = {}
     terminal_reason = TerminalReason.MAX_ACTIONS
     submitted_sql: str | None = None
+    infrastructure_error_code: str | None = None
+    infrastructure_request_sent: bool | None = None
     toolbox = SQLiteToolbox(
         db_path,
         exploration_timeout_seconds=runtime.exploration_timeout_seconds,
@@ -139,24 +139,40 @@ def run_episode(
             terminal_reason=TerminalReason.INFRASTRUCTURE_ERROR,
             reward=None,
             valid_for_training=False,
+            infrastructure_error_code="missing_database",
             config_hash=config_hash,
         )
+    database_sha_before = expected_database_sha256 or sha256_file(db_path)
 
     for step in range(runtime.max_episode_actions):
         event_id = f"{resolved_episode_id}:{step:02d}"
         try:
             response = policy.generate(messages, max_tokens=runtime.max_action_tokens)
-        except Exception:
+        except Exception as exc:
             terminal_reason = TerminalReason.INFRASTRUCTURE_ERROR
+            infrastructure_error_code = str(
+                getattr(exc, "error_code", "policy_error")
+            )
+            infrastructure_request_sent = getattr(exc, "request_sent", None)
+            exception_cost_usd = float(getattr(exc, "cost_usd", 0.0))
+            if exception_cost_usd > 0:
+                _merge_usage(
+                    usage,
+                    {"cost_micro_usd": round(exception_cost_usd * 1_000_000)},
+                )
             break
         _merge_usage(usage, response.usage)
-        if response.usage.get("output_tokens", 0) > runtime.max_action_tokens:
+        action_tokens = response.usage.get(
+            "action_tokens", response.usage.get("output_tokens", 0)
+        )
+        if action_tokens > runtime.max_action_tokens:
             event = _protocol_event(event_id, step, "Action 超过 token 上限")
             events.append(event)
             _append_actor_event(messages, event, None)
             continue
         if response.usage.get("context_tokens", 0) > runtime.max_context_tokens:
             terminal_reason = TerminalReason.INFRASTRUCTURE_ERROR
+            infrastructure_error_code = "context_overflow"
             break
         try:
             action = parse_action(response.content)
@@ -203,7 +219,11 @@ def run_episode(
         if observation.error_code == AuditStatus.UNSAFE_SQL.value:
             terminal_reason = TerminalReason.UNSAFE_SQL
             break
-        if action.action == "submit_sql":
+        if observation.error_code == AuditStatus.INFRASTRUCTURE_ERROR.value:
+            terminal_reason = TerminalReason.INFRASTRUCTURE_ERROR
+            infrastructure_error_code = "database_infrastructure_error"
+            break
+        if action.action == "submit_sql" and observation.ok:
             sql_value = action.arguments.get("sql")
             submitted_sql = sql_value if isinstance(sql_value, str) else None
             terminal_reason = TerminalReason.SUBMITTED
@@ -222,6 +242,13 @@ def run_episode(
         )
     else:
         decision = score_terminal(terminal_reason)
+    database_sha_after = (
+        sha256_file(db_path) if verify_database_sha else database_sha_before
+    )
+    if database_sha_after != database_sha_before:
+        terminal_reason = TerminalReason.INFRASTRUCTURE_ERROR
+        infrastructure_error_code = "database_sha_changed"
+        decision = score_terminal(terminal_reason)
     return EpisodeResult(
         episode_id=resolved_episode_id,
         task_id=task.task_id,
@@ -231,5 +258,8 @@ def run_episode(
         reward=decision.reward,
         valid_for_training=decision.valid_for_training,
         usage=usage,
+        database_sha256=database_sha_after,
+        infrastructure_error_code=infrastructure_error_code,
+        infrastructure_request_sent=infrastructure_request_sent,
         config_hash=config_hash,
     )

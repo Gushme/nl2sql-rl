@@ -8,7 +8,7 @@ paths:
   output_root: outputs
 runtime:
   gold_timeout_seconds: 10.0
-  exploration_timeout_seconds: 2.0
+  exploration_timeout_seconds: 10.0
   max_database_workers: 4
   max_episode_actions: 10
   max_action_tokens: 512

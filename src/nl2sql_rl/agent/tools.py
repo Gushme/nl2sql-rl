@@ -1,4 +1,4 @@
-"""BIRD SQLite 环境的五个只读工具。"""
+"""BIRD SQLite 环境的五个只读、结构化且可审计工具。"""
 
 from __future__ import annotations
 
@@ -11,9 +11,15 @@ from typing import Any
 
 from pydantic import Field, ValidationError
 
+from nl2sql_rl.agent.sql_semantics import SQLSemanticError, normalize_sql, physical_tables
 from nl2sql_rl.io_utils import stable_json
 from nl2sql_rl.models import AgentAction, AuditStatus, StrictRecord, ToolObservation
-from nl2sql_rl.sqlite_exec import QueryExecution, execute_read_only
+from nl2sql_rl.sqlite_exec import (
+    QueryExecution,
+    UnsafeSQLError,
+    execute_read_only,
+    validate_read_only_sql,
+)
 
 
 class _NoArguments(StrictRecord):
@@ -21,7 +27,7 @@ class _NoArguments(StrictRecord):
 
 
 class _DescribeArguments(StrictRecord):
-    tables: list[str] = Field(min_length=1, max_length=20)
+    tables: list[str] = Field(min_length=1, max_length=5)
 
 
 class _SearchArguments(StrictRecord):
@@ -33,6 +39,10 @@ class _SearchArguments(StrictRecord):
 
 class _SQLArguments(StrictRecord):
     sql: str = Field(min_length=1)
+
+
+class SchemaPayloadTooLarge(ValueError):
+    """单表结构化 schema 本身超过 observation 上限。"""
 
 
 def _quote_identifier(value: str) -> str:
@@ -49,9 +59,21 @@ def _limit_payload(payload: dict[str, Any], max_bytes: int) -> tuple[dict[str, A
     mutable = dict(payload)
     rows = mutable.get("rows")
     if isinstance(rows, list):
+        rows = list(rows)
+        mutable["rows"] = rows
         while rows and _payload_bytes(mutable) > max_bytes:
             rows.pop()
         mutable["returned_rows"] = len(rows)
+        if _payload_bytes(mutable) <= max_bytes:
+            return mutable, True
+    tables = mutable.get("tables")
+    if isinstance(tables, list):
+        tables = list(tables)
+        original_count = len(tables)
+        mutable["tables"] = tables
+        while tables and _payload_bytes(mutable) > max_bytes:
+            tables.pop()
+        mutable["omitted_table_count"] = original_count - len(tables)
         if _payload_bytes(mutable) <= max_bytes:
             return mutable, True
     encoded = stable_json(payload).encode("utf-8")
@@ -63,13 +85,13 @@ def _limit_payload(payload: dict[str, Any], max_bytes: int) -> tuple[dict[str, A
 
 
 class SQLiteToolbox:
-    """把模型动作映射到受限的只读 SQLite 操作。"""
+    """把模型动作映射到只读 SQLite，并强制提交前验证约束。"""
 
     def __init__(
         self,
         db_path: Path,
         *,
-        exploration_timeout_seconds: float = 2.0,
+        exploration_timeout_seconds: float = 10.0,
         submission_timeout_seconds: float = 10.0,
         max_observation_bytes: int = 8_192,
     ) -> None:
@@ -78,6 +100,8 @@ class SQLiteToolbox:
         self.submission_timeout_seconds = submission_timeout_seconds
         self.max_observation_bytes = max_observation_bytes
         self.last_submission: QueryExecution | None = None
+        self.last_successful_execution_sql: str | None = None
+        self.described_tables: set[str] = set()
 
     def _connect_catalog(self) -> sqlite3.Connection:
         if not self.db_path.is_file():
@@ -87,32 +111,95 @@ class SQLiteToolbox:
         connection.execute("PRAGMA query_only = ON")
         return connection
 
-    def _table_names(self) -> list[str]:
+    def _table_catalog(self) -> dict[str, str]:
         with self._connect_catalog() as connection:
             rows = connection.execute(
-                "SELECT name FROM sqlite_master "
+                "SELECT name, type FROM sqlite_master "
                 "WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
             ).fetchall()
-        return [str(row[0]) for row in rows]
+        return {str(name): str(kind) for name, kind in rows}
 
-    def _schema_payload(self, arguments: _DescribeArguments) -> dict[str, Any]:
-        known = set(self._table_names())
-        missing = sorted(set(arguments.tables).difference(known))
+    def _table_names(self) -> list[str]:
+        return list(self._table_catalog())
+
+    def _structured_schema(
+        self,
+        connection: sqlite3.Connection,
+        table: str,
+        object_type: str,
+    ) -> dict[str, Any]:
+        quoted = _quote_identifier(table)
+        column_rows = connection.execute(f"PRAGMA table_info({quoted})").fetchall()
+        foreign_key_rows = connection.execute(f"PRAGMA foreign_key_list({quoted})").fetchall()
+        columns = [
+            {
+                "name": str(row[1]),
+                "type": str(row[2] or ""),
+                "not_null": bool(row[3]),
+                "default": row[4],
+                "primary_key_position": int(row[5]),
+            }
+            for row in column_rows
+        ]
+        primary_key = [
+            str(row[1])
+            for row in sorted(column_rows, key=lambda item: int(item[5]) or 10**9)
+            if int(row[5]) > 0
+        ]
+        foreign_keys = [
+            {
+                "id": int(row[0]),
+                "sequence": int(row[1]),
+                "to_table": str(row[2]),
+                "from_column": str(row[3]),
+                "to_column": str(row[4]),
+                "on_update": str(row[5]),
+                "on_delete": str(row[6]),
+            }
+            for row in foreign_key_rows
+        ]
+        return {
+            "name": table,
+            "object_type": object_type,
+            "columns": columns,
+            "primary_key": primary_key,
+            "foreign_keys": foreign_keys,
+        }
+
+    def _schema_payload(
+        self, arguments: _DescribeArguments
+    ) -> tuple[dict[str, Any], bool]:
+        if len(arguments.tables) != len(set(arguments.tables)):
+            raise ValueError("tables 不允许重复")
+        catalog = self._table_catalog()
+        missing = sorted(set(arguments.tables).difference(catalog))
         if missing:
             raise ValueError(f"未知表：{missing}")
-        placeholders = ",".join("?" for _ in arguments.tables)
-        sql = (
-            "SELECT name, type, sql FROM sqlite_master "
-            f"WHERE name IN ({placeholders}) ORDER BY name"
-        )
         with self._connect_catalog() as connection:
-            rows = connection.execute(sql, arguments.tables).fetchall()
-        return {
-            "schemas": [
-                {"name": str(name), "type": str(kind), "ddl": str(ddl or "")}
-                for name, kind, ddl in rows
+            schemas = [
+                self._structured_schema(connection, table, catalog[table])
+                for table in arguments.tables
             ]
-        }
+        kept: list[dict[str, Any]] = []
+        for index, schema in enumerate(schemas):
+            candidate = {
+                "schemas": [*kept, schema],
+                "returned_tables": len(kept) + 1,
+                "omitted_tables": arguments.tables[index + 1 :],
+            }
+            if _payload_bytes(candidate) > self.max_observation_bytes:
+                break
+            kept.append(schema)
+        if not kept:
+            raise SchemaPayloadTooLarge(
+                f"表 {arguments.tables[0]} 的结构化 schema 超过 observation 上限"
+            )
+        omitted = arguments.tables[len(kept) :]
+        return {
+            "schemas": kept,
+            "returned_tables": len(kept),
+            "omitted_tables": omitted,
+        }, bool(omitted)
 
     def _search_sql(self, arguments: _SearchArguments) -> str:
         known = set(self._table_names())
@@ -148,18 +235,40 @@ class SQLiteToolbox:
             "result_digest": execution.digest,
         }
 
+    def _submission_gate(self, sql: str) -> str | None:
+        try:
+            validate_read_only_sql(sql)
+        except UnsafeSQLError:
+            raise
+        except ValueError as exc:
+            raise SQLSemanticError(str(exc)) from exc
+        normalized = normalize_sql(sql)
+        if self.last_successful_execution_sql is None:
+            return "submission_not_executed"
+        if normalized != self.last_successful_execution_sql:
+            return "submission_sql_mismatch"
+        missing = sorted(physical_tables(sql).difference(self.described_tables))
+        if missing:
+            return "undescribed_table"
+        return None
+
     def call(self, action: AgentAction, *, event_id: str) -> ToolObservation:
         started = time.monotonic()
         payload: dict[str, Any] = {}
         status = AuditStatus.PASSED
         error: str | None = None
+        explicit_error_code: str | None = None
+        truncated = False
         try:
             if action.action == "list_tables":
                 _NoArguments.model_validate(action.arguments)
                 payload = {"tables": self._table_names()}
             elif action.action == "describe_schema":
                 describe_args = _DescribeArguments.model_validate(action.arguments)
-                payload = self._schema_payload(describe_args)
+                payload, truncated = self._schema_payload(describe_args)
+                self.described_tables.update(
+                    str(schema["name"]).casefold() for schema in payload["schemas"]
+                )
             elif action.action == "search_values":
                 search_args = _SearchArguments.model_validate(action.arguments)
                 execution = execute_read_only(
@@ -176,36 +285,79 @@ class SQLiteToolbox:
             else:
                 sql_args = _SQLArguments.model_validate(action.arguments)
                 is_submit = action.action == "submit_sql"
-                execution = execute_read_only(
-                    sql_args.sql,
-                    self.db_path,
-                    timeout_seconds=(
-                        self.submission_timeout_seconds
-                        if is_submit
-                        else self.exploration_timeout_seconds
-                    ),
-                    max_rows=100_000 if is_submit else 50,
-                    max_result_bytes=64 * 1024 * 1024 if is_submit else self.max_observation_bytes,
-                    preview_limit=0 if is_submit else 50,
-                )
                 if is_submit:
-                    self.last_submission = execution
-                status = execution.status
-                error = execution.error
-                payload = self._query_payload(execution)
-        except (ValidationError, ValueError, FileNotFoundError, sqlite3.Error) as exc:
+                    explicit_error_code = self._submission_gate(sql_args.sql)
+                    if explicit_error_code is not None:
+                        error = {
+                            "submission_not_executed": "尚无成功的 execute_sql",
+                            "submission_sql_mismatch": "提交 SQL 与最后一次成功执行 SQL 不一致",
+                            "undescribed_table": "提交 SQL 引用了尚未成功描述的物理表",
+                        }[explicit_error_code]
+                    else:
+                        execution = execute_read_only(
+                            sql_args.sql,
+                            self.db_path,
+                            timeout_seconds=self.submission_timeout_seconds,
+                            max_rows=100_000,
+                            max_result_bytes=64 * 1024 * 1024,
+                            preview_limit=0,
+                        )
+                        self.last_submission = execution
+                        status = execution.status
+                        error = execution.error
+                        payload = self._query_payload(execution)
+                else:
+                    execution = execute_read_only(
+                        sql_args.sql,
+                        self.db_path,
+                        timeout_seconds=self.exploration_timeout_seconds,
+                        max_rows=50,
+                        max_result_bytes=self.max_observation_bytes,
+                        preview_limit=50,
+                    )
+                    status = execution.status
+                    error = execution.error
+                    payload = self._query_payload(execution)
+                    if status is AuditStatus.PASSED:
+                        self.last_successful_execution_sql = normalize_sql(sql_args.sql)
+        except ValidationError as exc:
+            explicit_error_code = "invalid_arguments"
+            error = f"{type(exc).__name__}: {exc}"[:500]
+        except SchemaPayloadTooLarge as exc:
+            explicit_error_code = "schema_too_large"
+            error = str(exc)[:500]
+        except UnsafeSQLError as exc:
+            status = AuditStatus.UNSAFE_SQL
+            error = str(exc)[:500]
+        except SQLSemanticError as exc:
+            status = AuditStatus.SYNTAX_ERROR
+            error = str(exc)[:500]
+        except ValueError as exc:
+            explicit_error_code = "invalid_arguments"
+            error = f"{type(exc).__name__}: {exc}"[:500]
+        except FileNotFoundError as exc:
+            status = AuditStatus.INFRASTRUCTURE_ERROR
+            error = f"{type(exc).__name__}: {exc}"[:500]
+        except sqlite3.Error as exc:
             status = AuditStatus.SQLITE_ERROR
             error = f"{type(exc).__name__}: {exc}"[:500]
         elapsed_ms = (time.monotonic() - started) * 1000
         if error is not None:
             payload["message"] = error
-        payload, truncated = _limit_payload(payload, self.max_observation_bytes)
+        if action.action != "describe_schema":
+            payload, payload_truncated = _limit_payload(payload, self.max_observation_bytes)
+            truncated = truncated or payload_truncated
+        ok = status is AuditStatus.PASSED and explicit_error_code is None
         return ToolObservation(
             event_id=event_id,
             tool=action.action,
-            ok=status is AuditStatus.PASSED,
+            ok=ok,
             payload=payload,
-            error_code=None if status is AuditStatus.PASSED else status.value,
+            error_code=(
+                None
+                if ok
+                else explicit_error_code or status.value
+            ),
             elapsed_ms=elapsed_ms,
             truncated=truncated,
         )

@@ -11,8 +11,9 @@ temperature: 0.0
 seed: 42
 enable_thinking: true
 reasoning_effort: high
-input_price_per_million: 0.16
-output_price_per_million: 0.32
+# 私有部署的真实价格必须从控制台读取，并折算为美元后显式覆盖。
+input_price_per_million: 0.0
+output_price_per_million: 0.0
 max_request_cost_usd: 0.01
 real_api: true
 collector:
@@ -21,6 +22,7 @@ collector:
   validation_quota: 100
   max_attempts: 1500
   run_attempt_limit: 100
+  diagnostic_batch_size: 100
   concurrency: 4
   seed: 42
   simple_ratio: 0.30

@@ -19,6 +19,8 @@ SQL 执行器是 EX 和 Reward 的唯一正确性裁判。LLM Judge 只评价 Ag
 
 本机也已完成 Dev500 全量审计：固定 annotation 包含 500 条、11 个数据库，498 条通过双执行审计，2 条超时，因此实际评测口径为 `Official-500 / Final-N=498`。Train/Validation/Dev 的 DB ID、数据库 SHA、task ID、标准化问题文本及近重复检查均无交叉。Base/SFT/GRPO 模型指标尚未运行。详见 [CPU 交付状态](docs/cpu-handoff.md)。
 
+Teacher 采集前的 Harness v2 离线 Gold 预检也已完成：按真实采样顺序取前 100 条，Train/Validation 为 90/10，简单/中等/挑战为 30/50/20，100 条全部通过 `describe_schema → execute_sql → submit_sql`，数据库 SHA256 全部不变。该结果不包含模型调用，也不代表 Teacher 合格率。
+
 ## 1. Fresh clone
 
 CPU 开发环境固定使用 Python 3.11 和 uv。本项目额外兼容 Python 3.12，仅用于固定的 veRL GPU 容器；本机 Python 3.13 不作为运行环境。
@@ -59,10 +61,14 @@ make pipeline-cpu
 真实 Teacher API 和 GPU 操作必须显式设置 `CONFIRM=1`；Teacher 还要求费用上限，API key 只从环境变量读取且不会出现在命令行：
 
 ```bash
-export TEACHER_API_KEY=...
+read -s TEACHER_API_KEY
+export TEACHER_API_KEY
+read -r TEACHER_INPUT_PRICE_PER_MILLION
+read -r TEACHER_OUTPUT_PRICE_PER_MILLION
+export TEACHER_INPUT_PRICE_PER_MILLION TEACHER_OUTPUT_PRICE_PER_MILLION
 CONFIRM=1 \
 TEACHER_ENDPOINT=https://provider.example/v1 \
-TEACHER_MODEL=teacher-model \
+TEACHER_MODEL=deepseek-v4-flash-0731 \
 TEACHER_COST_LIMIT_USD=20 \
 make teacher-collect
 
@@ -140,6 +146,14 @@ uv run nl2sql-rl data split
 
 允许的五个工具为 `list_tables`、`describe_schema`、`search_values`、`execute_sql` 和 `submit_sql`。SQL 同时经过 sqlglot guard、SQLite authorizer、`query_only=ON` 和只读 URI；DDL/DML、PRAGMA、ATTACH、扩展加载、多语句和写入型 CTE 均被拒绝。
 
+Teacher Harness v2 额外强制以下接受条件：
+
+- `describe_schema` 每次最多 5 张表，返回结构化的列、类型、主键和外键；8 KiB 超限时按表分页并返回 `omitted_tables`，不会退化为只有哈希的摘要；
+- 每条轨迹必须至少成功描述一次 schema、至少成功执行一次 SQL；探索和最终提交均使用 10 秒上限；
+- `submit_sql` 必须与最后一次成功 `execute_sql` 经 sqlglot 规范化后相同，并且最终 SQL 的所有物理表都已成功描述；
+- 任意参数、工具、协议或执行错误都会使轨迹退出主 SFT 候选，即使模型随后纠正成功；
+- replay 会逐事件比较 Action 与 observation 的 `ok/error_code/payload/truncated`，仅忽略耗时，并核对最终 SQL、Reward 和数据库 SHA。
+
 可用预生成 Action 做确定性 CPU 运行与回放：
 
 ```bash
@@ -164,12 +178,26 @@ uv run nl2sql-rl agent replay \
 
 ```bash
 make teacher-plan
+make teacher-harness-preflight
 ```
 
-真实请求必须同时提供轮换后的 API key、费用上限和显式确认。`reasoning_content` 只在响应解析期间读取，绝不保存或回传；思考 token 仍计入输出费用。下面的 endpoint 必须通过参数或 Make 变量注入，不写入仓库：
+当前计划池为 8,585 条，实际配额可行性已经验证：Train 61 个数据库、Validation 8 个数据库均有目标，计划前 100 条严格保持 90/10 和 30/50/20。离线 Gold 预检将完整逐任务记录写到忽略目录 `outputs/teacher/harness_preflight.json`，终端只显示无 Gold 的摘要。
+
+真实请求必须同时提供轮换后的 API key、费用上限、控制台单价和显式确认。[阿里云 DeepSeek API 文档](https://help.aliyun.com/en/model-studio/deepseek-api)说明思考 token 按输出 token 计费，但该工作区模型的实际价格必须从 Model Studio 控制台读取；项目不内置猜测价格。若控制台使用人民币，应先按本次活动固定汇率折算为美元单价，活动期间禁止变更口径。`reasoning_content` 只在响应解析期间读取，绝不保存或回传。下面的 endpoint 必须通过参数或 Make 变量注入，不写入仓库：
 
 ```bash
-export TEACHER_API_KEY=...
+read -s TEACHER_API_KEY
+export TEACHER_API_KEY
+read -r TEACHER_INPUT_PRICE_PER_MILLION
+read -r TEACHER_OUTPUT_PRICE_PER_MILLION
+export TEACHER_INPUT_PRICE_PER_MILLION TEACHER_OUTPUT_PRICE_PER_MILLION
+
+# 先发起恰好一次受保护的 Function Calling 探针。
+CONFIRM=1 \
+TEACHER_ENDPOINT=https://provider.example/v1 \
+TEACHER_MODEL=deepseek-v4-flash-0731 \
+TEACHER_COST_LIMIT_USD=20 \
+make teacher-probe
 
 uv run nl2sql-rl teacher collect \
   --tasks outputs/data/splits/tasks/teacher_pool.jsonl \
@@ -178,8 +206,8 @@ uv run nl2sql-rl teacher collect \
   --endpoint https://provider.example/v1 \
   --model deepseek-v4-flash-0731 \
   --cost-limit-usd 20 \
-  --input-price-per-million 0.16 \
-  --output-price-per-million 0.32 \
+  --input-price-per-million "$TEACHER_INPUT_PRICE_PER_MILLION" \
+  --output-price-per-million "$TEACHER_OUTPUT_PRICE_PER_MILLION" \
   --max-request-cost-usd 0.01 \
   --run-attempt-limit 100 \
   --enable-thinking \
@@ -187,7 +215,11 @@ uv run nl2sql-rl teacher collect \
   --confirm-real-api
 ```
 
-采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时；累计尝试数与累计费用不会因再次运行而重置。把合格轨迹转换为 SFT 对话：
+采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时。活动账本 `campaign_state.json` 跨运行、跨 Harness 版本累计探针与正式请求，1,500 次尝试和费用上限都不会因升级或续采重置。每 100 次尝试冻结一个诊断批次；协议/参数错误、schema 信息丢失、超时、上下文溢出、循环、replay 不一致、数据库 SHA 改变或系统性 API 异常达到门槛时会自动停止后续请求。
+
+如果模型可见 Prompt、工具 schema、observation、超时、SQL Guard 或接受标准变化，必须使用新的 Harness 哈希和输出文件。旧轨迹只有在初始 Actor 消息、可见协议、逐事件 observation、最终 SQL、Reward 和数据库 SHA 全部一致时才能迁移；否则任务回到原分层队列重新采集。最终 SFT 只接受一个 Harness 配置哈希。
+
+把 1,000 条合格轨迹转换为 SFT 对话：
 
 ```bash
 uv run nl2sql-rl teacher build-sft \
@@ -195,7 +227,7 @@ uv run nl2sql-rl teacher build-sft \
   --attempts outputs/teacher/attempts.jsonl
 ```
 
-只有 assistant Action 内容产生 label；system、user 和工具 observation 都被 mask 为 `-100`。
+只有 assistant Action 内容产生 label；system、user 和工具 observation 都被 mask 为 `-100`。终局 observation、思考内容、Gold、Reward、EX 和拒绝轨迹不会进入 SFT 数据。
 
 ## 5. SFT 与 checkpoint handoff
 

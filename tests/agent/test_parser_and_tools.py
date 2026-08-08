@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from nl2sql_rl.agent.parser import ActionParseError, parse_action
+from nl2sql_rl.agent.sql_semantics import normalize_sql, physical_tables
 from nl2sql_rl.agent.tools import SQLiteToolbox
 from nl2sql_rl.models import AgentAction
 
@@ -39,7 +41,7 @@ def test_five_tools_are_read_only_and_return_bounded_observations(agent_db: Path
             arguments={"table": "employees", "column": "name", "query": "li", "limit": 20},
         ),
         AgentAction(action="execute_sql", arguments={"sql": "SELECT name FROM employees"}),
-        AgentAction(action="submit_sql", arguments={"sql": "SELECT COUNT(*) FROM employees"}),
+        AgentAction(action="submit_sql", arguments={"sql": "SELECT name FROM employees"}),
     ]
     observations = [
         toolbox.call(action, event_id=f"event_{index}")
@@ -47,7 +49,12 @@ def test_five_tools_are_read_only_and_return_bounded_observations(agent_db: Path
     ]
     assert all(observation.ok for observation in observations)
     assert observations[0].payload["tables"] == ["departments", "employees"]
-    assert "CREATE TABLE employees" in observations[1].payload["schemas"][0]["ddl"]
+    employee_schema = observations[1].payload["schemas"][0]
+    assert employee_schema["name"] == "employees"
+    assert {column["name"] for column in employee_schema["columns"]} >= {
+        "id",
+        "name",
+    }
     assert observations[2].payload["returned_rows"] == 1
     assert observations[3].payload["returned_rows"] == 3
     assert toolbox.last_submission is not None
@@ -88,4 +95,113 @@ def test_tool_validation_errors_are_observations_not_exceptions(agent_db: Path) 
         event_id="bad_column",
     )
     assert not observation.ok
-    assert observation.error_code == "sqlite_error"
+    assert observation.error_code == "invalid_arguments"
+
+
+def test_schema_pagination_keeps_structured_columns_and_reports_omissions(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "wide.sqlite"
+    with sqlite3.connect(database) as connection:
+        for index in range(6):
+            connection.execute(
+                f"CREATE TABLE table_{index}(id INTEGER PRIMARY KEY, name TEXT, value REAL)"
+            )
+    toolbox = SQLiteToolbox(database, max_observation_bytes=900)
+    too_many = toolbox.call(
+        AgentAction(
+            action="describe_schema",
+            arguments={"tables": [f"table_{index}" for index in range(6)]},
+        ),
+        event_id="too_many",
+    )
+    assert not too_many.ok
+    assert too_many.error_code == "invalid_arguments"
+
+    paged = toolbox.call(
+        AgentAction(
+            action="describe_schema",
+            arguments={"tables": [f"table_{index}" for index in range(5)]},
+        ),
+        event_id="paged",
+    )
+    assert paged.ok
+    assert paged.truncated
+    assert paged.payload["omitted_tables"]
+    assert all(schema["columns"] for schema in paged.payload["schemas"])
+    assert "sha256" not in paged.payload
+    assert len(json.dumps(paged.payload, ensure_ascii=False).encode()) <= 900
+
+
+def test_submit_requires_last_execute_and_all_physical_tables_described(
+    agent_db: Path,
+) -> None:
+    sql = (
+        "SELECT e.name FROM employees e JOIN departments d "
+        "ON e.department_id = d.id"
+    )
+    toolbox = SQLiteToolbox(agent_db)
+    no_execute = toolbox.call(
+        AgentAction(action="submit_sql", arguments={"sql": sql}),
+        event_id="no_execute",
+    )
+    assert no_execute.error_code == "submission_not_executed"
+
+    toolbox.call(
+        AgentAction(action="describe_schema", arguments={"tables": ["employees"]}),
+        event_id="describe_employees",
+    )
+    assert toolbox.call(
+        AgentAction(action="execute_sql", arguments={"sql": sql}),
+        event_id="execute",
+    ).ok
+    missing_schema = toolbox.call(
+        AgentAction(action="submit_sql", arguments={"sql": sql}),
+        event_id="missing_schema",
+    )
+    assert missing_schema.error_code == "undescribed_table"
+
+    toolbox.call(
+        AgentAction(action="describe_schema", arguments={"tables": ["departments"]}),
+        event_id="describe_departments",
+    )
+    mismatch = toolbox.call(
+        AgentAction(action="submit_sql", arguments={"sql": "SELECT name FROM employees"}),
+        event_id="mismatch",
+    )
+    assert mismatch.error_code == "submission_sql_mismatch"
+    equivalent = toolbox.call(
+        AgentAction(action="submit_sql", arguments={"sql": sql + ";"}),
+        event_id="equivalent",
+    )
+    assert equivalent.ok
+    assert normalize_sql(sql) == normalize_sql(sql + ";")
+
+
+def test_sql_table_extraction_ignores_cte_aliases() -> None:
+    sql = (
+        "WITH recent AS (SELECT id FROM employees) "
+        "SELECT recent.id FROM recent JOIN departments d ON recent.id = d.id"
+    )
+    assert physical_tables(sql) == {"employees", "departments"}
+
+
+def test_exploration_timeout_defaults_to_ten_seconds_and_can_interrupt(
+    agent_db: Path,
+) -> None:
+    toolbox = SQLiteToolbox(agent_db)
+    assert toolbox.exploration_timeout_seconds == 10.0
+    impatient = SQLiteToolbox(agent_db, exploration_timeout_seconds=0.001)
+    recursive = impatient.call(
+        AgentAction(
+            action="execute_sql",
+            arguments={
+                "sql": (
+                    "WITH RECURSIVE counter(x) AS (SELECT 1 UNION ALL "
+                    "SELECT x + 1 FROM counter) SELECT max(x) FROM counter"
+                )
+            },
+        ),
+        event_id="timeout",
+    )
+    assert recursive.error_code == "timeout"

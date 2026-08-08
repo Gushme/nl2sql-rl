@@ -73,7 +73,19 @@ def test_fake_rollout_masks_actions_but_not_tool_observations(tmp_path: Path) ->
     _database(database)
     task, answer = _task_answer()
     actions = [
-        AgentAction(action="list_tables", arguments={}),
+        AgentAction(
+            action="describe_schema",
+            arguments={"tables": ["employees", "departments"]},
+        ),
+        AgentAction(
+            action="execute_sql",
+            arguments={
+                "sql": (
+                    "SELECT e.name FROM employees e JOIN departments d "
+                    "ON e.department_id=d.id WHERE d.name='研发'"
+                )
+            },
+        ),
         AgentAction(
             action="submit_sql",
             arguments={

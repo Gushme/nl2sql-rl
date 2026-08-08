@@ -15,6 +15,9 @@
 - 完整包 annotation 与固定 HF annotation 有 1 条 SQL 差异，包内 Gold 文件有 4 条差异；两者只记录 provenance，固定 HF annotation 始终是唯一 Gold 来源。
 - Qwen2.5-Coder-1.5B-Instruct 固定 revision 的 tokenizer/config 已下载并校验；未下载权重。
 - CPU fixture 端到端演练已通过，覆盖只读双执行、错误后纠正、mock Teacher、统一评测 rollout、Action-only SFT、EX、SFT handoff 和 GRPO action mask。
+- Teacher 分层采样计划已在 8,585 条候选上生成：Train/Validation 目标为 900/100，简单/中等/挑战目标为 300/500/200，并覆盖 Train 61 个、Validation 8 个数据库。
+- Teacher Harness v2 已用计划前缀 100 条隐藏 Gold 做离线预检：90 条 Train、10 条 Validation，复杂度为 30/50/20，100 条全部通过，数据库 SHA256 全部不变；1 次 schema 分页仍保留结构化列信息。
+- 实测 5 秒探索上限会让预检中的一条 Gold 偶发超时，因此在任何付费请求前把 `execute_sql` 探索上限调整为 10 秒，并写入新的 Harness 配置哈希 `b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4`。
 
 权威机器可读结果见 `data/manifests/` 下的 Train/Dev inventory、审计 summary、
 `split_manifest.json`、`leakage_report.json` 和模型依赖清单。
@@ -33,10 +36,12 @@ uv run nl2sql-rl data split
 
 ## 本轮未执行
 
-- 真实外部 Teacher API 请求与 1,000 条轨迹采集；
+- 真实外部 Teacher Function Calling 探针、100 次 Pilot 与 1,000 条轨迹采集；
 - Base、SFT、GRPO 模型推理；
 - GPU SFT、checkpoint 合并和 GPU GRPO；
 - LLM 行为 Judge。
 
 这些入口均已实现并由 mock、tiny 随机模型或 dry-run 覆盖，必须由用户在具备 API/GPU 和费用授权后显式启动。
 仓库没有生成或声称任何 Base/SFT/GRPO 的真实 Mini-Dev 指标。
+
+真实 Teacher 启动前必须轮换曾经在聊天中出现过的密钥，并通过无回显环境变量注入。仓库配置只保留占位 endpoint 和零价格哨兵；输入、输出 token 的美元折算单价必须从 Model Studio 控制台读取并显式提供。探针、正式采集、累计费用、尝试次数、采样清单、Teacher 行为配置、计费口径、Harness 版本、诊断暂停和轨迹迁移共用同一个本地活动账本。

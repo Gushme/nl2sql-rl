@@ -27,6 +27,7 @@ DEFAULT_COMPLEXITY_WEIGHTS: dict[ComplexityBucket, float] = {
     ComplexityBucket.MODERATE: 0.50,
     ComplexityBucket.CHALLENGING: 0.20,
 }
+SAMPLING_VERSION = "stratified-v3-data-bound"
 
 
 class SamplingInfeasible(RuntimeError):
@@ -65,6 +66,7 @@ class SamplingPlan:
             candidates_by_complexity[f"{split}:{bucket.value}"] += len(task_ids)
         return {
             "schema_version": 1,
+            "sampling_version": SAMPLING_VERSION,
             "seed": self.seed,
             "candidate_total": sum(candidates_by_split.values()),
             "candidates_by_split": dict(sorted(candidates_by_split.items())),
@@ -327,13 +329,36 @@ def build_sampling_plan(
                     sorted(candidate_ids, key=lambda task_id: _tie_hash(seed, task_id))
                 )
 
+    # 把 Actor 输入、Gold 内容和分桶成员关系都绑定到清单哈希，防止数据静默漂移。
+    candidate_fingerprints = []
+    task_by_id = {task.task_id: task for task in tasks}
+    for task_id in sorted(task_ids):
+        task = task_by_id[task_id]
+        answer = answer_by_id[task_id]
+        candidate_fingerprints.append(
+            {
+                "task": task.actor_payload(),
+                "gold_sha256": hashlib.sha256(answer.gold_sql.encode("utf-8")).hexdigest(),
+                "audit_status": answer.audit_status.value,
+                "complexity": task_complexity[task_id].bucket.value,
+                "complexity_score": task_complexity[task_id].score,
+            }
+        )
     manifest_payload = {
+        "sampling_version": SAMPLING_VERSION,
         "seed": seed,
-        "task_ids": sorted(task_ids),
+        "candidate_fingerprints": candidate_fingerprints,
         "cell_targets": {
             f"{split}:{db_id}:{bucket.value}": target
             for (split, db_id, bucket), target in sorted(
                 cell_targets.items(), key=lambda item: (item[0][0], item[0][1], item[0][2].value)
+            )
+        },
+        "ordered_task_ids": {
+            f"{split}:{db_id}:{bucket.value}": list(ordered_ids)
+            for (split, db_id, bucket), ordered_ids in sorted(
+                ordered_task_ids.items(),
+                key=lambda item: (item[0][0], item[0][1], item[0][2].value),
             )
         },
     }
@@ -376,6 +401,11 @@ class StratifiedScheduler:
             task_set = set(task_ids)
             self.accepted[cell] = len(task_set.intersection(accepted_ids))
             self.attempted[cell] = len(task_set.intersection(completed_ids))
+        self.attempted_by_split: Counter[str] = Counter()
+        self.attempted_by_complexity: Counter[tuple[str, ComplexityBucket]] = Counter()
+        for (split, _, bucket), count in self.attempted.items():
+            self.attempted_by_split[split] += count
+            self.attempted_by_complexity[split, bucket] += count
         self.reallocations: list[dict[str, Any]] = []
 
     @property
@@ -412,14 +442,30 @@ class StratifiedScheduler:
             cell = min(
                 available,
                 key=lambda item: (
-                    self.attempted[item] / max(1, self.targets[item]),
-                    self.accepted[item] / max(1, self.targets[item]),
+                    (
+                        self.attempted_by_split[item[0]]
+                        + 1
+                    )
+                    / sum(
+                        target
+                        for (split, _), target in self.plan.database_targets.items()
+                        if split == item[0]
+                    ),
+                    (
+                        self.attempted_by_complexity[item[0], item[2]]
+                        + 1
+                    )
+                    / max(1, self.plan.complexity_targets[item[0], item[2]]),
+                    (self.attempted[item] + 1) / max(1, self.targets[item]),
+                    (self.accepted[item] + pending[item]) / max(1, self.targets[item]),
                     _tie_hash(self.plan.seed, f"{item[0]}:{item[1]}:{item[2].value}"),
                 ),
             )
             task_id = self.queues[cell].popleft()
             self.attempted[cell] += 1
             pending[cell] += 1
+            self.attempted_by_split[cell[0]] += 1
+            self.attempted_by_complexity[cell[0], cell[2]] += 1
             selected.append(task_id)
         return selected
 

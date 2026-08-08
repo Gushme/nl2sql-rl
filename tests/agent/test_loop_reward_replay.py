@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from nl2sql_rl.agent.fingerprint import harness_config_hash, harness_payload
 from nl2sql_rl.agent.loop import ScriptedPolicy, build_actor_messages, run_episode
 from nl2sql_rl.agent.replay import replay_episode
 from nl2sql_rl.agent.reward import score_terminal
@@ -54,7 +55,11 @@ def _execution(status: AuditStatus, digest: str | None = "digest") -> QueryExecu
 def test_agent_can_recover_from_tool_error_and_submit_correct_sql(agent_db: Path) -> None:
     policy = ScriptedPolicy(
         [
+            AgentAction(action="describe_schema", arguments={"tables": ["employees"]}),
             AgentAction(action="execute_sql", arguments={"sql": "SELECT missing FROM employees"}),
+            AgentAction(
+                action="execute_sql", arguments={"sql": "SELECT COUNT(*) FROM employees"}
+            ),
             AgentAction(action="submit_sql", arguments={"sql": "SELECT COUNT(*) FROM employees"}),
         ]
     )
@@ -69,13 +74,15 @@ def test_agent_can_recover_from_tool_error_and_submit_correct_sql(agent_db: Path
     )
     assert episode.terminal_reason is TerminalReason.SUBMITTED
     assert episode.reward == 1.0
-    assert episode.events[0].observation.error_code == "missing_table_or_column"
-    assert episode.events[1].observation.ok
+    assert episode.events[1].observation.error_code == "missing_table_or_column"
+    assert episode.events[2].observation.ok
+    assert episode.events[3].observation.ok
 
     replay = replay_episode(
         episode, _task(), _answer(), agent_db, runtime=RuntimeConfig()
     )
     assert replay.exact_terminal_outcome
+    assert replay.exact_event_replay
 
 
 def test_three_identical_actions_terminate_as_loop(agent_db: Path) -> None:
@@ -126,6 +133,60 @@ def test_actor_context_never_contains_hidden_answer_or_reward(agent_db: Path) ->
     rollout = episode.model_dump_json()
     assert _answer().gold_sql not in rollout
     assert "gold_sql" not in rollout
+
+
+def test_harness_hash_covers_runtime_protocol_guard_and_acceptance() -> None:
+    first = RuntimeConfig(exploration_timeout_seconds=5.0)
+    second = RuntimeConfig(exploration_timeout_seconds=6.0)
+    assert harness_config_hash(first) != harness_config_hash(second)
+    payload = harness_payload(first)
+    assert payload["visible_protocol"]["system_prompt"]
+    assert payload["visible_protocol"]["tools"]
+    assert payload["observation_schema"]
+    assert payload["sql_guard_version"]
+    assert payload["acceptance_version"] == 2
+
+
+def test_full_event_replay_detects_observation_tampering(agent_db: Path) -> None:
+    actions = [
+        AgentAction(action="describe_schema", arguments={"tables": ["employees"]}),
+        AgentAction(
+            action="execute_sql", arguments={"sql": "SELECT COUNT(*) FROM employees"}
+        ),
+        AgentAction(action="submit_sql", arguments={"sql": "SELECT COUNT(*) FROM employees"}),
+    ]
+    episode = run_episode(
+        _task(),
+        _answer(),
+        agent_db,
+        ScriptedPolicy(actions),
+        runtime=RuntimeConfig(),
+        config_hash="fixture",
+        episode_id="tamper",
+    )
+    first_event = episode.events[0]
+    tampered_observation = first_event.observation.model_copy(
+        update={"payload": {"schemas": []}}
+    )
+    tampered = episode.model_copy(
+        update={
+            "events": [
+                first_event.model_copy(update={"observation": tampered_observation}),
+                *episode.events[1:],
+            ]
+        }
+    )
+    replay = replay_episode(
+        tampered,
+        _task(),
+        _answer(),
+        agent_db,
+        runtime=RuntimeConfig(),
+    )
+    assert replay.exact_terminal_outcome
+    assert not replay.events_match
+    assert replay.event_mismatches == (0,)
+    assert not replay.exact_event_replay
 
 
 @pytest.mark.parametrize(

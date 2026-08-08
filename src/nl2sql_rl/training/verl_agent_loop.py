@@ -215,7 +215,10 @@ class NL2SQLAgentLoop(_VerlAgentLoopBase):  # type: ignore[misc]
                     if observation.error_code == AuditStatus.UNSAFE_SQL.value:
                         terminal = True
                         terminal_reason = TerminalReason.UNSAFE_SQL
-                    elif action.action == "submit_sql":
+                    elif observation.error_code == AuditStatus.INFRASTRUCTURE_ERROR.value:
+                        terminal = True
+                        terminal_reason = TerminalReason.INFRASTRUCTURE_ERROR
+                    elif action.action == "submit_sql" and observation.ok:
                         sql_value = action.arguments.get("sql")
                         submitted_sql = sql_value if isinstance(sql_value, str) else None
                         terminal = True

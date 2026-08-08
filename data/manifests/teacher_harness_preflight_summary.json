@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_harness_gold_preflight",
+  "run_date": "2026-08-08",
+  "model_api_called": false,
+  "gold_sql_saved": false,
+  "candidate_total": 8585,
+  "selected": 100,
+  "passed": 100,
+  "failed": 0,
+  "error_counts": {},
+  "selected_by_split": {
+    "train": 90,
+    "validation": 10
+  },
+  "selected_by_complexity": {
+    "simple": 30,
+    "moderate": 50,
+    "challenging": 20
+  },
+  "schema_truncations": 1,
+  "database_hashes_unchanged": true,
+  "exploration_timeout_seconds": 10.0,
+  "submission_timeout_seconds": 10.0,
+  "sampling_version": "stratified-v3-data-bound",
+  "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4"
+}

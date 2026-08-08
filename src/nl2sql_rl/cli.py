@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 import typer
 
 from nl2sql_rl import __version__
+from nl2sql_rl.agent.fingerprint import harness_config_hash
 from nl2sql_rl.agent.loop import ScriptedPolicy, run_episode
 from nl2sql_rl.agent.replay import replay_episode
 from nl2sql_rl.config import load_project_config
@@ -24,7 +27,7 @@ from nl2sql_rl.eval.inference import InferenceRecord, collect_inference_episodes
 from nl2sql_rl.eval.judge import blind_prompt, build_blind_payload
 from nl2sql_rl.eval.pipeline import PredictionRecord, score_dataset
 from nl2sql_rl.eval.report import render_comparison_report, render_report, write_report
-from nl2sql_rl.io_utils import read_jsonl, sha256_file, write_json, write_jsonl
+from nl2sql_rl.io_utils import read_jsonl, sha256_file, stable_json, write_json, write_jsonl
 from nl2sql_rl.models import (
     AgentAction,
     EpisodeResult,
@@ -32,13 +35,15 @@ from nl2sql_rl.models import (
     HiddenAnswer,
     TaskView,
 )
+from nl2sql_rl.teacher.campaign import prepare_campaign_state, register_campaign_attempt
 from nl2sql_rl.teacher.client import LLMClient, LLMClientConfig
 from nl2sql_rl.teacher.collector import (
     CollectorConfig,
     TeacherAttempt,
     collect_trajectories,
-    historical_cost_usd,
 )
+from nl2sql_rl.teacher.preflight import preflight_scheduled_gold
+from nl2sql_rl.teacher.probe import run_function_call_probe
 from nl2sql_rl.teacher.sampling import build_sampling_plan
 from nl2sql_rl.training.grpo import (
     build_verl_command,
@@ -54,7 +59,7 @@ from nl2sql_rl.training.sft import (
     preflight_sft,
     run_sft_training,
 )
-from nl2sql_rl.training.sft_data import build_sft_conversations
+from nl2sql_rl.training.sft_data import JSONTokenizer, build_sft_conversations
 
 app = typer.Typer(help="BIRD SQLite Agentic NL2SQL post-training toolkit.")
 data_app = typer.Typer(help="Build and audit BIRD data.")
@@ -68,6 +73,33 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(teacher_app, name="teacher")
 app.add_typer(train_app, name="train")
 app.add_typer(eval_app, name="eval")
+
+
+def _validate_teacher_pricing(
+    *,
+    input_price_per_million: float,
+    output_price_per_million: float,
+    max_context_tokens: int,
+    max_completion_tokens: int,
+    max_request_cost_usd: float,
+    cost_limit_usd: float,
+) -> None:
+    """确保费用预留覆盖单次请求的保守 token 上界。"""
+    if input_price_per_million <= 0 or output_price_per_million <= 0:
+        raise typer.BadParameter("真实 Teacher 调用必须显式设置控制台 token 单价")
+    # 工具 JSON schema 也计入 Teacher prompt，额外预留 4K token。
+    conservative_input_tokens = max_context_tokens + 4_096
+    conservative_request_cost = (
+        conservative_input_tokens * input_price_per_million
+        + max_completion_tokens * output_price_per_million
+    ) / 1_000_000
+    if max_request_cost_usd + 1e-12 < conservative_request_cost:
+        raise typer.BadParameter(
+            "max_request_cost_usd 小于上下文、工具 schema 与最大输出的保守费用上界："
+            f"{max_request_cost_usd:.6f} < {conservative_request_cost:.6f}"
+        )
+    if max_request_cost_usd > cost_limit_usd + 1e-12:
+        raise typer.BadParameter("max_request_cost_usd 不能超过活动费用上限")
 
 
 @app.command()
@@ -268,7 +300,11 @@ def agent_replay(
         "terminal_matches": comparison.terminal_matches,
         "submitted_sql_matches": comparison.submitted_sql_matches,
         "reward_matches": comparison.reward_matches,
+        "events_match": comparison.events_match,
+        "event_mismatches": list(comparison.event_mismatches),
+        "database_sha_matches": comparison.database_sha_matches,
         "exact_terminal_outcome": comparison.exact_terminal_outcome,
+        "exact_event_replay": comparison.exact_event_replay,
         "reproduced": comparison.reproduced.model_dump(mode="json"),
     }
     if output is not None:
@@ -521,6 +557,151 @@ def eval_compare(
     typer.echo(json.dumps({"output": str(output), "final_n": len(runs["base"])}, indent=2))
 
 
+@teacher_app.command("probe")
+def teacher_probe(
+    endpoint: Annotated[str, typer.Option()],
+    model: Annotated[str, typer.Option()],
+    cost_limit_usd: Annotated[float, typer.Option(min=0.000001)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/probe.json"
+    ),
+    campaign_state_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/campaign_state.json"
+    ),
+    api_key_env: str = "TEACHER_API_KEY",
+    confirm_real_api: Annotated[bool, typer.Option("--confirm-real-api")] = False,
+    input_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
+    output_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
+    max_request_cost_usd: Annotated[float, typer.Option(min=0.000001)] = 0.01,
+    target_total: Annotated[int, typer.Option(min=1)] = 1_000,
+    max_attempts: Annotated[int, typer.Option(min=1)] = 1_500,
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/project.yaml"
+    ),
+) -> None:
+    """执行一次受累计费用保护的 thinking + Function Calling 探针。"""
+    if not confirm_real_api:
+        raise typer.BadParameter("真实 Teacher probe 必须显式设置 --confirm-real-api")
+    if output.exists():
+        raise typer.BadParameter(f"probe 输出已存在，拒绝重复请求：{output}")
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        raise typer.BadParameter(f"环境变量 {api_key_env} 未设置")
+    project = load_project_config(config)
+    _validate_teacher_pricing(
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
+        max_context_tokens=project.runtime.max_context_tokens,
+        max_completion_tokens=8_192,
+        max_request_cost_usd=max_request_cost_usd,
+        cost_limit_usd=cost_limit_usd,
+    )
+    client_config = LLMClientConfig(
+        endpoint=endpoint,
+        model=model,
+        concurrency=1,
+        max_retries=4,
+        timeout_seconds=180.0,
+        max_completion_tokens=8_192,
+        normalized_action_token_limit=512,
+        temperature=0.0,
+        seed=42,
+        enable_thinking=True,
+        reasoning_effort="high",
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
+        max_request_cost_usd=max_request_cost_usd,
+        real_api=True,
+    )
+    campaign_state = prepare_campaign_state(
+        campaign_state_output,
+        attempt_paths=[],
+        target_total=target_total,
+        max_attempts=max_attempts,
+        cost_limit_usd=cost_limit_usd,
+        teacher_behavior_hash=client_config.behavior_fingerprint(),
+        pricing_hash=client_config.pricing_fingerprint(),
+    )
+
+    async def run() -> tuple[dict[str, Any], float]:
+        async with LLMClient(
+            client_config,
+            api_key=api_key,
+            cost_limit_usd=cost_limit_usd,
+            initial_spent_usd=campaign_state.spent_usd,
+        ) as client:
+            try:
+                report = await run_function_call_probe(client)
+            except Exception as exc:
+                error_code = str(getattr(exc, "error_code", "probe_error"))
+                report = {
+                    "schema_version": 1,
+                    "ok": False,
+                    "error_code": error_code,
+                    "request_sent": getattr(exc, "request_sent", None),
+                    "cost_usd": float(getattr(exc, "cost_usd", 0.0)),
+                    "reasoning_content_saved": False,
+                }
+            return report, client.spent_usd
+
+    report, spent_usd = asyncio.run(run())
+    error_code = str(report.get("error_code", ""))
+    if error_code != "cost_limit_exceeded" or report.get("request_sent") is True:
+        response_id = str(report.get("response_id") or "")
+        episode_id = response_id or "probe_" + hashlib.sha256(
+            stable_json(
+                {
+                    "client": client_config.behavior_fingerprint(),
+                    "attempt": campaign_state.attempts,
+                }
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+        register_campaign_attempt(
+            campaign_state_output,
+            campaign_state,
+            episode_id=episode_id,
+            spent_usd=spent_usd,
+            harness_config_hash=harness_config_hash(project.runtime),
+        )
+    write_json(output, report)
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
+    if not report.get("ok"):
+        raise typer.Exit(code=2)
+
+
+@teacher_app.command("harness-preflight")
+def teacher_harness_preflight(
+    tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    answers: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    db_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/harness_preflight.json"
+    ),
+    limit: Annotated[int, typer.Option(min=1, max=1_000)] = 100,
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/project.yaml"
+    ),
+) -> None:
+    """用计划前缀的隐藏 Gold 离线验证 Harness，不保存 Gold SQL。"""
+    project = load_project_config(config)
+    task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
+    answer_rows = [HiddenAnswer.model_validate(row) for row in read_jsonl(answers)]
+    report = preflight_scheduled_gold(
+        task_rows,
+        answer_rows,
+        db_root,
+        runtime=project.runtime,
+        limit=limit,
+        seed=project.seed,
+    )
+    write_json(output, report)
+    # 完整逐任务记录保存在报告文件中，终端仅打印摘要，避免输出过长。
+    summary = {key: value for key, value in report.items() if key != "records"}
+    typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+    if report["failed"] or not report["database_hashes_unchanged"]:
+        raise typer.Exit(code=2)
+
+
 @teacher_app.command("plan")
 def teacher_plan(
     tasks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
@@ -576,6 +757,15 @@ def teacher_collect(
     summary_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
         "outputs/teacher/summary.json"
     ),
+    diagnostics_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "outputs/teacher/diagnostics"
+    ),
+    campaign_state_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
+        "outputs/teacher/campaign_state.json"
+    ),
+    migrate_from: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False)
+    ] = None,
     api_key_env: Annotated[str, typer.Option()] = "TEACHER_API_KEY",
     confirm_real_api: Annotated[bool, typer.Option("--confirm-real-api")] = False,
     real_api: Annotated[bool, typer.Option("--real-api/--mock-api")] = True,
@@ -597,6 +787,9 @@ def teacher_collect(
     normalized_action_token_limit: Annotated[int, typer.Option(min=16)] = 512,
     api_timeout_seconds: Annotated[float, typer.Option(min=0.001)] = 180.0,
     max_retries: Annotated[int, typer.Option(min=0, max=10)] = 4,
+    tokenizer_json: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "models/Qwen2.5-Coder-1.5B-Instruct-metadata/tokenizer.json"
+    ),
     input_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
     output_price_per_million: Annotated[float, typer.Option(min=0)] = 0.0,
     max_request_cost_usd: Annotated[float, typer.Option(min=0.000001)] = 1.0,
@@ -605,7 +798,18 @@ def teacher_collect(
     ),
 ) -> None:
     """采集合格 Teacher 轨迹；真实 API 需要费用上限和显式确认。"""
+    if real_api and not confirm_real_api:
+        raise typer.BadParameter("真实 Teacher 采集必须显式设置 --confirm-real-api")
     project = load_project_config(config)
+    if real_api:
+        _validate_teacher_pricing(
+            input_price_per_million=input_price_per_million,
+            output_price_per_million=output_price_per_million,
+            max_context_tokens=project.runtime.max_context_tokens,
+            max_completion_tokens=max_completion_tokens,
+            max_request_cost_usd=max_request_cost_usd,
+            cost_limit_usd=cost_limit_usd,
+        )
     if reasoning_effort not in {"low", "medium", "high"}:
         raise typer.BadParameter("reasoning_effort 必须是 low、medium 或 high")
     api_key = os.environ.get(api_key_env)
@@ -613,6 +817,27 @@ def teacher_collect(
         raise typer.BadParameter(f"环境变量 {api_key_env} 未设置")
     task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
     answer_rows = [HiddenAnswer.model_validate(row) for row in read_jsonl(answers)]
+    collector_config = CollectorConfig(
+        target_total=target_total,
+        train_quota=train_quota,
+        validation_quota=validation_quota,
+        max_attempts=max_attempts,
+        run_attempt_limit=run_attempt_limit,
+        concurrency=concurrency,
+        seed=seed,
+        simple_ratio=simple_ratio,
+        moderate_ratio=moderate_ratio,
+        challenging_ratio=challenging_ratio,
+        confirm_real_api=confirm_real_api,
+    )
+    collector_config.validate_quotas()
+    sampling_plan = build_sampling_plan(
+        task_rows,
+        answer_rows,
+        split_targets={"train": train_quota, "validation": validation_quota},
+        complexity_weights=collector_config.complexity_weights(),
+        seed=seed,
+    )
     client_config = LLMClientConfig(
         endpoint=endpoint,
         model=model,
@@ -630,26 +855,22 @@ def teacher_collect(
         max_request_cost_usd=max_request_cost_usd,
         real_api=real_api,
     )
-    collector_config = CollectorConfig(
+    campaign_state = prepare_campaign_state(
+        campaign_state_output,
+        attempt_paths=[output, *([migrate_from] if migrate_from is not None else [])],
         target_total=target_total,
-        train_quota=train_quota,
-        validation_quota=validation_quota,
         max_attempts=max_attempts,
-        run_attempt_limit=run_attempt_limit,
-        concurrency=concurrency,
-        seed=seed,
-        simple_ratio=simple_ratio,
-        moderate_ratio=moderate_ratio,
-        challenging_ratio=challenging_ratio,
-        confirm_real_api=confirm_real_api,
+        cost_limit_usd=cost_limit_usd,
+        sampling_manifest_hash=sampling_plan.manifest_hash,
+        teacher_behavior_hash=client_config.behavior_fingerprint(),
+        pricing_hash=client_config.pricing_fingerprint(),
     )
-
     async def run() -> dict[str, object]:
         async with LLMClient(
             client_config,
             api_key=api_key,
             cost_limit_usd=cost_limit_usd,
-            initial_spent_usd=historical_cost_usd(output),
+            initial_spent_usd=campaign_state.spent_usd,
         ) as client:
             return await collect_trajectories(
                 task_rows,
@@ -659,6 +880,11 @@ def teacher_collect(
                 client,
                 runtime=project.runtime,
                 config=collector_config,
+                tokenizer=JSONTokenizer(tokenizer_json),
+                diagnostics_dir=diagnostics_dir,
+                campaign_state_path=campaign_state_output,
+                campaign_state=campaign_state,
+                migration_source=migrate_from,
             )
 
     summary = asyncio.run(run())
@@ -676,10 +902,33 @@ def teacher_build_sft(
     validation_output: Annotated[Path, typer.Option(dir_okay=False)] = Path(
         "outputs/sft/validation.jsonl"
     ),
+    require_complete: Annotated[
+        bool, typer.Option("--require-complete/--allow-partial")
+    ] = True,
 ) -> None:
     """只从 EX 正确且协议安全的轨迹构建无 Gold 泄漏 SFT 对话。"""
     task_rows = [TaskView.model_validate(row) for row in read_jsonl(tasks)]
     attempt_rows = [TeacherAttempt.model_validate(row) for row in read_jsonl(attempts)]
+    accepted_attempts = [row for row in attempt_rows if row.accepted]
+    if require_complete:
+        split_counts = Counter(row.split for row in accepted_attempts)
+        complexity_counts = Counter(row.complexity.value for row in accepted_attempts)
+        expected_splits = {"train": 900, "validation": 100}
+        expected_complexity = {"simple": 300, "moderate": 500, "challenging": 200}
+        if dict(split_counts) != expected_splits:
+            raise typer.BadParameter(
+                f"SFT 合格轨迹 split 配额不完整：{dict(split_counts)} != {expected_splits}"
+            )
+        if dict(complexity_counts) != expected_complexity:
+            raise typer.BadParameter(
+                "SFT 合格轨迹复杂度配额不完整："
+                f"{dict(complexity_counts)} != {expected_complexity}"
+            )
+        database_keys = {(row.split, row.db_id) for row in accepted_attempts}
+        if len(database_keys) != 69:
+            raise typer.BadParameter(f"SFT 数据库覆盖应为 69，实际为 {len(database_keys)}")
+        if len({row.task_id for row in accepted_attempts}) != 1_000:
+            raise typer.BadParameter("SFT 合格轨迹 task_id 必须恰好为 1,000 个")
     conversations = build_sft_conversations(task_rows, attempt_rows)
     train_rows = [
         row.model_dump(mode="json") for row in conversations if row.split == "train"
@@ -693,7 +942,16 @@ def teacher_build_sft(
     write_jsonl(validation_output, validation_rows)
     typer.echo(
         json.dumps(
-            {"train": len(train_rows), "validation": len(validation_rows)},
+            {
+                "train": len(train_rows),
+                "validation": len(validation_rows),
+                "source_config_hashes": sorted(
+                    {row.source_config_hash for row in conversations}
+                ),
+                "source_harness_config_hashes": sorted(
+                    {row.source_harness_config_hash for row in conversations}
+                ),
+            },
             indent=2,
         )
     )

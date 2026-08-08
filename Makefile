@@ -21,14 +21,19 @@ TEACHER_DB_ROOT ?= train
 TEACHER_ATTEMPTS ?= outputs/teacher/attempts.jsonl
 TEACHER_SUMMARY ?= outputs/teacher/summary.json
 TEACHER_PLAN ?= outputs/teacher/sampling_plan.json
+TEACHER_PROBE_OUTPUT ?= outputs/teacher/probe.json
+TEACHER_PREFLIGHT_REPORT ?= outputs/teacher/harness_preflight.json
+TEACHER_DIAGNOSTICS_DIR ?= outputs/teacher/diagnostics
+TEACHER_CAMPAIGN_STATE ?= outputs/teacher/campaign_state.json
+TEACHER_MIGRATE_FROM ?=
 E2E_OUTPUT ?= outputs/cpu_e2e/make-$(shell date +%Y%m%d-%H%M%S)
 
 CONFIRM ?= 0
 TEACHER_ENDPOINT ?=
 TEACHER_MODEL ?= deepseek-v4-flash-0731
 TEACHER_COST_LIMIT_USD ?=
-TEACHER_INPUT_PRICE_PER_MILLION ?= 0.16
-TEACHER_OUTPUT_PRICE_PER_MILLION ?= 0.32
+TEACHER_INPUT_PRICE_PER_MILLION ?=
+TEACHER_OUTPUT_PRICE_PER_MILLION ?=
 TEACHER_MAX_REQUEST_COST_USD ?= 0.01
 TEACHER_TARGET_TOTAL ?= 1000
 TEACHER_TRAIN_QUOTA ?= 900
@@ -54,7 +59,8 @@ EVAL_ROOT = $(EVALUATION_ROOT)/$(EVAL_LABEL)
 
 .PHONY: help setup lint typecheck test test-full build check
 .PHONY: data-train data-dev-local data-split data-all cpu-e2e pipeline-cpu
-.PHONY: teacher-plan teacher-collect teacher-build-sft sft-preflight sft-run sft-export
+.PHONY: teacher-plan teacher-harness-preflight teacher-probe teacher-collect teacher-build-sft
+.PHONY: sft-preflight sft-run sft-export
 .PHONY: grpo-preflight grpo-run eval-base eval-sft eval-grpo eval-compare
 .PHONY: guard-confirm guard-teacher guard-eval _eval-model
 
@@ -78,6 +84,8 @@ help:
 		'' \
 		'显式外部操作：' \
 		'  teacher-plan      离线生成分层采样配额，不调用 API' \
+		'  teacher-harness-preflight 用前 100 个 Gold 离线验证 Harness' \
+		'  teacher-probe     单次 Function Calling 探针；要求 CONFIRM=1' \
 		'  teacher-collect   真实 Teacher API；要求 CONFIRM=1 和费用上限' \
 		'  teacher-build-sft 构建 Action-only SFT 数据' \
 		'  sft-preflight     SFT 配置与数据预检' \
@@ -139,6 +147,8 @@ guard-teacher: guard-confirm
 	@if [[ -z "$(TEACHER_ENDPOINT)" ]]; then echo "拒绝执行：TEACHER_ENDPOINT 未设置"; exit 2; fi
 	@if [[ -z "$(TEACHER_MODEL)" ]]; then echo "拒绝执行：TEACHER_MODEL 未设置"; exit 2; fi
 	@if [[ -z "$(TEACHER_COST_LIMIT_USD)" ]]; then echo "拒绝执行：TEACHER_COST_LIMIT_USD 必须显式设置"; exit 2; fi
+	@if [[ -z "$(TEACHER_INPUT_PRICE_PER_MILLION)" ]]; then echo "拒绝执行：必须按控制台设置 TEACHER_INPUT_PRICE_PER_MILLION"; exit 2; fi
+	@if [[ -z "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" ]]; then echo "拒绝执行：必须按控制台设置 TEACHER_OUTPUT_PRICE_PER_MILLION"; exit 2; fi
 
 teacher-plan:
 	$(CLI) teacher plan \
@@ -148,6 +158,29 @@ teacher-plan:
 		--target-total "$(TEACHER_TARGET_TOTAL)" \
 		--train-quota "$(TEACHER_TRAIN_QUOTA)" \
 		--validation-quota "$(TEACHER_VALIDATION_QUOTA)"
+
+teacher-harness-preflight:
+	$(CLI) teacher harness-preflight \
+		--tasks "$(TEACHER_TASKS)" \
+		--answers "$(TEACHER_ANSWERS)" \
+		--db-root "$(TEACHER_DB_ROOT)" \
+		--output "$(TEACHER_PREFLIGHT_REPORT)" \
+		--limit 100 \
+		--config "$(PROJECT_CONFIG)"
+
+teacher-probe: guard-teacher
+	$(CLI) teacher probe \
+		--endpoint "$(TEACHER_ENDPOINT)" \
+		--model "$(TEACHER_MODEL)" \
+		--cost-limit-usd "$(TEACHER_COST_LIMIT_USD)" \
+		--output "$(TEACHER_PROBE_OUTPUT)" \
+		--campaign-state-output "$(TEACHER_CAMPAIGN_STATE)" \
+		--input-price-per-million "$(TEACHER_INPUT_PRICE_PER_MILLION)" \
+		--output-price-per-million "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" \
+		--max-request-cost-usd "$(TEACHER_MAX_REQUEST_COST_USD)" \
+		--target-total "$(TEACHER_TARGET_TOTAL)" \
+		--max-attempts "$(TEACHER_MAX_ATTEMPTS)" \
+		--confirm-real-api
 
 teacher-collect: guard-teacher
 	$(CLI) teacher collect \
@@ -159,6 +192,8 @@ teacher-collect: guard-teacher
 		--cost-limit-usd "$(TEACHER_COST_LIMIT_USD)" \
 		--output "$(TEACHER_ATTEMPTS)" \
 		--summary-output "$(TEACHER_SUMMARY)" \
+		--diagnostics-dir "$(TEACHER_DIAGNOSTICS_DIR)" \
+		--campaign-state-output "$(TEACHER_CAMPAIGN_STATE)" $(if $(TEACHER_MIGRATE_FROM),--migrate-from "$(TEACHER_MIGRATE_FROM)") \
 		--input-price-per-million "$(TEACHER_INPUT_PRICE_PER_MILLION)" \
 		--output-price-per-million "$(TEACHER_OUTPUT_PRICE_PER_MILLION)" \
 		--max-request-cost-usd "$(TEACHER_MAX_REQUEST_COST_USD)" \

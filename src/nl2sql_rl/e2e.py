@@ -61,14 +61,23 @@ class _MockActionClient:
     ) -> LLMCompletion:
         del max_tokens
         self.calls += 1
-        action = (
+        action_count = sum(message.get("role") == "assistant" for message in messages)
+        if action_count == 0:
+            action = AgentAction(
+                action="describe_schema", arguments={"tables": ["items"]}
+            )
+        elif action_count == 1:
+            action = AgentAction(
+                action="execute_sql",
+                arguments={"sql": "SELECT COUNT(*) FROM items"},
+            )
+        else:
+            action = (
             AgentAction(
                 action="submit_sql",
                 arguments={"sql": "SELECT COUNT(*) FROM items"},
             )
-            if messages[-1]["role"] == "tool"
-            else AgentAction(action="list_tables", arguments={})
-        )
+            )
         return LLMCompletion(
             action=action,
             response_id=f"cpu_fixture_{self.calls}",
@@ -185,6 +194,7 @@ async def _run_async_components(
             moderate_ratio=0.0,
             challenging_ratio=0.0,
         ),
+        tokenizer=_CharacterTokenizer(),
     )
     attempts = [
         TeacherAttempt.model_validate(row)
@@ -241,6 +251,7 @@ def run_cpu_e2e(output_root: Path, *, agent_loop_config: Path) -> dict[str, Any]
     )
 
     correction_actions = [
+        AgentAction(action="describe_schema", arguments={"tables": ["items"]}),
         AgentAction(
             action="execute_sql",
             arguments={"sql": "SELECT missing_column FROM items"},
@@ -363,8 +374,15 @@ def run_cpu_e2e(output_root: Path, *, agent_loop_config: Path) -> dict[str, Any]
         "harness": {
             "reward": correction_episode.reward,
             "steps": len(correction_episode.events),
-            "first_error": correction_episode.events[0].observation.error_code,
-            "replay_exact": replay.exact_terminal_outcome,
+            "first_error": next(
+                (
+                    event.observation.error_code
+                    for event in correction_episode.events
+                    if event.observation.error_code is not None
+                ),
+                None,
+            ),
+            "replay_exact": replay.exact_event_replay,
         },
         "teacher": teacher_summary,
         "sft": {

@@ -481,6 +481,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "sqlglot" },
+    { name = "tokenizers" },
     { name = "typer" },
 ]
 
@@ -517,6 +518,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "safetensors", marker = "extra == 'sft'", specifier = "==0.5.3" },
     { name = "sqlglot", specifier = ">=27,<30" },
+    { name = "tokenizers", specifier = ">=0.21,<0.22" },
     { name = "torch", marker = "extra == 'sft'", specifier = "==2.6.0" },
     { name = "transformers", marker = "extra == 'sft'", specifier = "==4.51.3" },
     { name = "typer", specifier = ">=0.16,<1" },

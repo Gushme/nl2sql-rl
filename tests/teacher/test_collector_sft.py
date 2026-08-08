@@ -32,10 +32,21 @@ class FakeTeacherClient:
     ) -> LLMCompletion:
         assert messages and max_tokens is None
         self.calls += 1
-        return LLMCompletion(
-            action=AgentAction(
+        action_count = sum(message.get("role") == "assistant" for message in messages)
+        if action_count == 0:
+            action = AgentAction(
+                action="describe_schema", arguments={"tables": ["items"]}
+            )
+        elif action_count == 1:
+            action = AgentAction(
+                action="execute_sql", arguments={"sql": "SELECT COUNT(*) FROM items"}
+            )
+        else:
+            action = AgentAction(
                 action="submit_sql", arguments={"sql": "SELECT COUNT(*) FROM items"}
-            ),
+            )
+        return LLMCompletion(
+            action=action,
             response_id=f"mock_{self.calls}",
             input_tokens=10,
             output_tokens=5,
@@ -107,6 +118,7 @@ async def test_collector_resumes_without_duplicate_requests_and_builds_sft(
         client,
         runtime=RuntimeConfig(),
         config=config,
+        tokenizer=CharacterTokenizer(),
     )
     second = await collect_trajectories(
         tasks,
@@ -116,9 +128,10 @@ async def test_collector_resumes_without_duplicate_requests_and_builds_sft(
         client,
         runtime=RuntimeConfig(),
         config=config,
+        tokenizer=CharacterTokenizer(),
     )
     assert first["complete"] is True and second["complete"] is True
-    assert client.calls == 2
+    assert client.calls == 6
     assert len(read_jsonl(output)) == 2
 
     attempts = [TeacherAttempt.model_validate(row) for row in read_jsonl(output)]
@@ -144,6 +157,8 @@ async def test_collector_resumes_without_duplicate_requests_and_builds_sft(
     rendered = "".join(chr(token_id) for token_id in tokenized.input_ids)
     assert "<|im_start|>user\n<tool_response>" in rendered
     assert "<|im_start|>tool" not in rendered
+    assert conversation.messages[-1]["role"] == "assistant"
+    assert conversation.messages[-1]["content"].startswith('{"action":"submit_sql"')
 
 
 @pytest.mark.asyncio

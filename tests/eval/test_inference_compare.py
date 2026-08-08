@@ -41,13 +41,20 @@ class FakeInferenceClient:
     ) -> LLMCompletion:
         assert max_tokens == 512
         self.calls += 1
-        if messages[-1]["role"] == "tool":
+        action_count = sum(message.get("role") == "assistant" for message in messages)
+        if action_count == 0:
+            action = AgentAction(
+                action="describe_schema", arguments={"tables": ["items"]}
+            )
+        elif action_count == 1:
+            action = AgentAction(
+                action="execute_sql", arguments={"sql": "SELECT COUNT(*) FROM items"}
+            )
+        else:
             action = AgentAction(
                 action="submit_sql",
                 arguments={"sql": "SELECT COUNT(*) FROM items"},
             )
-        else:
-            action = AgentAction(action="list_tables", arguments={})
         return LLMCompletion(
             action=action,
             response_id=f"mock_{self.calls}",
@@ -115,7 +122,7 @@ async def test_inference_collects_every_task_and_resumes_idempotently(
         concurrency=2,
     )
     assert len(first) == len(second) == 2
-    assert client.calls == 4
+    assert client.calls == 6
     assert all(record.episode.reward == 1.0 for record in first)
     assert summary["submitted_count"] == 2
     assert len(summary["comparison_condition_hash"]) == 64

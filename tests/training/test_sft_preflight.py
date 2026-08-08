@@ -32,6 +32,7 @@ def _conversation(task_id: str, split: str) -> SFTConversation:
         ],
         assistant_message_indexes=[2],
         source_config_hash="teacher",
+        source_harness_config_hash="harness",
     )
 
 

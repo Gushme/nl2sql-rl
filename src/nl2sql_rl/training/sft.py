@@ -11,8 +11,9 @@ from typing import Any
 import yaml
 from pydantic import Field, model_validator
 
+from nl2sql_rl.agent.parser import ActionParseError, parse_action
 from nl2sql_rl.io_utils import read_jsonl, sha256_file, stable_json, write_json
-from nl2sql_rl.models import StrictRecord
+from nl2sql_rl.models import StrictRecord, ToolObservation
 from nl2sql_rl.training.model_assets import BASE_MODEL, MODEL_REVISION
 from nl2sql_rl.training.sft_data import SFTConversation, tokenize_action_only
 
@@ -96,6 +97,8 @@ def _load_conversations(path: Path) -> list[SFTConversation]:
 def inspect_sft_data(config: SFTConfig) -> dict[str, Any]:
     reports: dict[str, dict[str, Any]] = {}
     all_ids: dict[str, set[str]] = {}
+    source_config_hashes: set[str] = set()
+    source_harness_hashes: set[str] = set()
     for split, path in (
         ("train", config.train_data),
         ("validation", config.validation_data),
@@ -110,6 +113,23 @@ def inspect_sft_data(config: SFTConfig) -> dict[str, Any]:
             raise ValueError(f"SFT {split} task_id 不唯一")
         if any(row.split != split for row in rows):
             raise ValueError(f"SFT {split} 文件包含错误 split")
+        for row in rows:
+            source_config_hashes.add(row.source_config_hash)
+            source_harness_hashes.add(row.source_harness_config_hash)
+            if not row.messages or row.messages[-1].get("role") != "assistant":
+                raise ValueError(f"SFT {split} 样本必须以 Assistant submit_sql 结束")
+            try:
+                final_action = parse_action(str(row.messages[-1].get("content", "")))
+            except ActionParseError as exc:
+                raise ValueError(f"SFT {split} 终局 Action 不合法") from exc
+            if final_action.action != "submit_sql":
+                raise ValueError(f"SFT {split} 样本最后一个 Action 不是 submit_sql")
+            for message in row.messages:
+                if message.get("role") != "tool":
+                    continue
+                observation = ToolObservation.model_validate_json(str(message["content"]))
+                if not observation.ok or observation.error_code is not None:
+                    raise ValueError(f"SFT {split} 包含错误 observation")
         serialized = stable_json([row.model_dump(mode="json") for row in rows])
         if "gold_sql" in serialized or '"reward"' in serialized:
             raise ValueError(f"SFT {split} 数据出现隐藏字段")
@@ -123,7 +143,15 @@ def inspect_sft_data(config: SFTConfig) -> dict[str, Any]:
     overlap = all_ids["train"].intersection(all_ids["validation"])
     if overlap:
         raise ValueError(f"SFT train/validation task_id 交叉：{len(overlap)}")
-    return {"schema_version": 1, "splits": reports, "task_id_overlap": []}
+    if len(source_config_hashes) != 1 or len(source_harness_hashes) != 1:
+        raise ValueError("SFT train/validation 必须来自唯一采集配置和 Harness 哈希")
+    return {
+        "schema_version": 1,
+        "splits": reports,
+        "task_id_overlap": [],
+        "source_config_hash": next(iter(source_config_hashes)),
+        "source_harness_config_hash": next(iter(source_harness_hashes)),
+    }
 
 
 def sft_run_hash(config: SFTConfig, data_report: dict[str, Any]) -> str:

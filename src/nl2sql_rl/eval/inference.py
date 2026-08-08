@@ -10,11 +10,12 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Protocol
 
-from nl2sql_rl.agent.loop import SYSTEM_PROMPT, ModelResponse, run_episode
+from nl2sql_rl.agent.loop import ModelResponse, run_episode
+from nl2sql_rl.agent.spec import ACTION_TOOLS, SYSTEM_PROMPT
 from nl2sql_rl.config import RuntimeConfig
 from nl2sql_rl.io_utils import read_jsonl, stable_json
 from nl2sql_rl.models import EpisodeResult, HiddenAnswer, StrictRecord, TaskView, TerminalReason
-from nl2sql_rl.teacher.client import ACTION_TOOLS, LLMCompletion
+from nl2sql_rl.teacher.client import LLMCompletion
 
 
 class EvaluationActionClient(Protocol):
@@ -54,11 +55,21 @@ class _AsyncClientPolicy:
             self.client.complete_action(messages, max_tokens=max_tokens), self.loop
         )
         completion = future.result()
+        content = (
+            stable_json(completion.action.model_dump(mode="json"))
+            if completion.action is not None
+            else completion.action_text or ""
+        )
         return ModelResponse(
-            content=stable_json(completion.action.model_dump(mode="json")),
+            content=content,
             usage={
                 "input_tokens": completion.input_tokens,
                 "output_tokens": completion.output_tokens,
+                "action_tokens": completion.action_tokens or completion.output_tokens,
+                "context_tokens": completion.input_tokens
+                + (completion.action_tokens or completion.output_tokens),
+                "normalization_failed": int(completion.normalization_error is not None),
+                "native_tool_call": int(completion.response_format == "native_tool_call"),
                 "cost_micro_usd": round(completion.cost_usd * 1_000_000),
             },
         )

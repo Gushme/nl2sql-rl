@@ -13,71 +13,9 @@ import httpx
 from pydantic import Field
 
 from nl2sql_rl.agent.parser import ActionParseError, parse_action
+from nl2sql_rl.agent.spec import ACTION_TOOLS
 from nl2sql_rl.io_utils import stable_json
 from nl2sql_rl.models import AgentAction, StrictRecord
-
-ACTION_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_tables",
-            "description": "列出数据库中的用户表和视图",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "describe_schema",
-            "description": "查看指定表的 SQLite DDL",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "tables": {"type": "array", "items": {"type": "string"}, "minItems": 1}
-                },
-                "required": ["tables"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_values",
-            "description": "在一个表列中搜索候选值",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "table": {"type": "string"},
-                    "column": {"type": "string"},
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-                },
-                "required": ["table", "column", "query"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    *[
-        {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {"sql": {"type": "string"}},
-                    "required": ["sql"],
-                    "additionalProperties": False,
-                },
-            },
-        }
-        for name, description in (
-            ("execute_sql", "只读执行候选 SQL 并查看受限结果"),
-            ("submit_sql", "提交最终 SQL 并结束 episode"),
-        )
-    ],
-]
 
 
 class LLMClientConfig(StrictRecord):
@@ -116,27 +54,66 @@ class LLMClientConfig(StrictRecord):
         }
         return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
 
+    def pricing_fingerprint(self) -> str:
+        """冻结按美元折算的 token 单价，防止活动中途改变计费口径。"""
+        payload = {
+            "currency": "USD",
+            "input_price_per_million": self.input_price_per_million,
+            "output_price_per_million": self.output_price_per_million,
+        }
+        return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
+
 
 class TeacherAPIError(RuntimeError):
     """Teacher endpoint 重试耗尽或响应不合法。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "teacher_api_error",
+        request_sent: bool = True,
+        cost_usd: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.request_sent = request_sent
+        self.cost_usd = cost_usd
 
 
 class CostLimitExceeded(RuntimeError):
     """下一次请求的预留费用会超过显式上限。"""
 
+    error_code = "cost_limit_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_sent: bool = False,
+        cost_usd: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.request_sent = request_sent
+        self.cost_usd = cost_usd
+
 
 @dataclass(frozen=True)
 class LLMCompletion:
-    action: AgentAction
+    action: AgentAction | None
     response_id: str | None
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    action_text: str | None = None
     reasoning_tokens: int | None = None
     action_tokens: int | None = None
     cached_input_tokens: int = 0
     latency_ms: float = 0.0
     finish_reason: str | None = None
+    response_format: Literal["native_tool_call", "text_json"] = "text_json"
+    normalization_error: str | None = None
+    reasoning_present: bool = False
 
 
 class CostLedger:
@@ -170,9 +147,18 @@ class CostLedger:
         async with self._lock:
             self.reserved_usd = max(0.0, self.reserved_usd - self.reservation_usd)
             self.spent_usd += actual_usd
+            if actual_usd > self.reservation_usd + 1e-12:
+                raise CostLimitExceeded(
+                    "单次请求实际费用超过保守预留："
+                    f"{actual_usd:.6f} > {self.reservation_usd:.6f} USD",
+                    request_sent=True,
+                    cost_usd=actual_usd,
+                )
             if self.spent_usd > self.cap_usd + 1e-12:
                 raise CostLimitExceeded(
-                    f"实际费用超过上限：{self.spent_usd:.6f} > {self.cap_usd:.6f} USD"
+                    f"实际费用超过上限：{self.spent_usd:.6f} > {self.cap_usd:.6f} USD",
+                    request_sent=True,
+                    cost_usd=actual_usd,
                 )
 
     async def release(self) -> None:
@@ -198,28 +184,44 @@ def api_compatible_messages(messages: list[dict[str, Any]]) -> list[dict[str, st
     return converted
 
 
-def _normalize_choice(message: dict[str, Any]) -> AgentAction:
+def _normalize_choice(
+    message: dict[str, Any],
+) -> tuple[AgentAction | None, str, str | None, Literal["native_tool_call", "text_json"]]:
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list) and tool_calls:
         if len(tool_calls) != 1:
-            raise ActionParseError("每轮只允许一个原生 tool_call")
+            error = "每轮只允许一个原生 tool_call"
+            text = stable_json({"native_tool_call_count": len(tool_calls)})
+            return None, text, error, "native_tool_call"
         call = tool_calls[0]
         if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
-            raise ActionParseError("原生 tool_call 结构不合法")
+            error = "原生 tool_call 结构不合法"
+            text = stable_json({"invalid_native_tool_call": True})
+            return None, text, error, "native_tool_call"
         function = call["function"]
         arguments = function.get("arguments", {})
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise ActionParseError("tool_call arguments 不是合法 JSON") from exc
-        return AgentAction.model_validate(
+            except json.JSONDecodeError:
+                arguments = function.get("arguments", "")
+        action_text = stable_json(
             {"action": function.get("name"), "arguments": arguments}
         )
+        try:
+            action = parse_action(action_text)
+        except ActionParseError as exc:
+            return None, action_text, str(exc), "native_tool_call"
+        return action, action_text, None, "native_tool_call"
     content = message.get("content")
     if not isinstance(content, str):
-        raise ActionParseError("Teacher 响应既无 tool_call，也无文本 JSON")
-    return parse_action(content)
+        error = "Teacher 响应既无 tool_call，也无文本 JSON"
+        return None, "", error, "text_json"
+    try:
+        action = parse_action(content)
+    except ActionParseError as exc:
+        return None, content, str(exc), "text_json"
+    return action, stable_json(action.model_dump(mode="json")), None, "text_json"
 
 
 class LLMClient:
@@ -253,6 +255,10 @@ class LLMClient:
     @property
     def behavior_config_hash(self) -> str:
         return self.config.behavior_fingerprint()
+
+    @property
+    def pricing_config_hash(self) -> str:
+        return self.config.pricing_fingerprint()
 
     @property
     def real_api(self) -> bool:
@@ -305,15 +311,31 @@ class LLMClient:
                 for attempt in range(self.config.max_retries + 1):
                     try:
                         response = await self._client.post("chat/completions", json=payload)
-                        if response.status_code != 429 and response.status_code < 500:
-                            response.raise_for_status()
+                        if response.status_code < 400:
                             break
+                        if response.status_code not in {429} and response.status_code < 500:
+                            if response.status_code in {401, 403}:
+                                error_code = "authentication_error"
+                            elif response.status_code in {400, 404, 422}:
+                                error_code = "model_or_request_error"
+                            else:
+                                error_code = "api_client_error"
+                            raise TeacherAPIError(
+                                f"Teacher 返回不可重试状态：{response.status_code}",
+                                error_code=error_code,
+                            )
                     except (httpx.TimeoutException, httpx.TransportError):
                         if attempt >= self.config.max_retries:
-                            raise
+                            raise TeacherAPIError(
+                                "Teacher 网络请求重试耗尽",
+                                error_code="api_transport_error",
+                            ) from None
                     if attempt >= self.config.max_retries:
                         status = response.status_code if response is not None else "transport"
-                        raise TeacherAPIError(f"Teacher 请求重试耗尽：{status}")
+                        raise TeacherAPIError(
+                            f"Teacher 请求重试耗尽：{status}",
+                            error_code="api_retry_exhausted",
+                        )
                     retry_after = (
                         float(response.headers.get("Retry-After", "0"))
                         if response is not None
@@ -323,24 +345,69 @@ class LLMClient:
                     if delay:
                         await asyncio.sleep(delay)
                 if response is None:
-                    raise TeacherAPIError("Teacher 未返回响应")
-                raw: Any = response.json()
+                    raise TeacherAPIError(
+                        "Teacher 未返回响应", error_code="api_empty_response"
+                    )
+                try:
+                    raw: Any = response.json()
+                except ValueError as exc:
+                    raise TeacherAPIError(
+                        "Teacher 响应不是合法 JSON",
+                        error_code="api_invalid_response",
+                    ) from exc
                 if not isinstance(raw, dict):
-                    raise TeacherAPIError("Teacher 响应顶层不是 JSON 对象")
+                    raise TeacherAPIError(
+                        "Teacher 响应顶层不是 JSON 对象",
+                        error_code="api_invalid_response",
+                    )
                 choices = raw.get("choices")
                 if not isinstance(choices, list) or not choices:
-                    raise TeacherAPIError("Teacher 响应缺少 choices")
+                    raise TeacherAPIError(
+                        "Teacher 响应缺少 choices", error_code="api_invalid_response"
+                    )
                 first = choices[0]
                 if not isinstance(first, dict) or not isinstance(first.get("message"), dict):
-                    raise TeacherAPIError("Teacher choice.message 不合法")
+                    raise TeacherAPIError(
+                        "Teacher choice.message 不合法",
+                        error_code="api_invalid_response",
+                    )
                 message = first["message"]
-                action = _normalize_choice(message)
+                action, action_text, normalization_error, response_format = (
+                    _normalize_choice(message)
+                )
                 # reasoning_content 可能很长；只读取存在性，绝不写入返回值或后续消息。
                 has_reasoning = bool(message.get("reasoning_content"))
                 usage_value = raw.get("usage")
+                if self.config.real_api and not isinstance(usage_value, dict):
+                    raise TeacherAPIError(
+                        "Teacher 真实响应缺少 usage",
+                        error_code="api_invalid_response",
+                    )
                 usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
-                input_tokens = int(usage.get("prompt_tokens", 0))
-                output_tokens = int(usage.get("completion_tokens", 0))
+                if self.config.real_api and not {
+                    "prompt_tokens",
+                    "completion_tokens",
+                }.issubset(usage):
+                    raise TeacherAPIError(
+                        "Teacher 真实响应缺少 prompt/completion token 用量",
+                        error_code="api_invalid_response",
+                    )
+                try:
+                    input_tokens = int(usage.get("prompt_tokens", 0))
+                    output_tokens = int(usage.get("completion_tokens", 0))
+                except (TypeError, ValueError) as exc:
+                    raise TeacherAPIError(
+                        "Teacher token 用量不是整数",
+                        error_code="api_invalid_response",
+                    ) from exc
+                if input_tokens < 0 or output_tokens < 0:
+                    raise TeacherAPIError(
+                        "Teacher token 用量不能为负数",
+                        error_code="api_invalid_response",
+                    )
+                cost = self._cost(input_tokens, output_tokens)
+                await self._ledger.settle(cost)
+                settled = True
                 completion_details_value = usage.get(
                     "completion_tokens_details", usage.get("output_tokens_details")
                 )
@@ -356,22 +423,37 @@ class LLMClient:
                     prompt_details_value if isinstance(prompt_details_value, dict) else {}
                 )
                 reasoning_value = completion_details.get("reasoning_tokens")
-                reasoning_tokens = (
-                    int(reasoning_value) if reasoning_value is not None else None
-                )
-                if reasoning_tokens is not None and reasoning_tokens > output_tokens:
-                    raise TeacherAPIError("reasoning_tokens 大于 completion_tokens")
+                try:
+                    reasoning_tokens = (
+                        int(reasoning_value) if reasoning_value is not None else None
+                    )
+                    cached_input_tokens = int(prompt_details.get("cached_tokens", 0))
+                except (TypeError, ValueError) as exc:
+                    raise TeacherAPIError(
+                        "Teacher token 明细不是整数",
+                        error_code="api_invalid_response",
+                        cost_usd=cost,
+                    ) from exc
+                if reasoning_tokens is not None and not 0 <= reasoning_tokens <= output_tokens:
+                    raise TeacherAPIError(
+                        "reasoning_tokens 不在 completion_tokens 范围内",
+                        error_code="api_invalid_response",
+                        cost_usd=cost,
+                    )
                 action_tokens = (
                     output_tokens - reasoning_tokens
                     if reasoning_tokens is not None
                     else (output_tokens if not has_reasoning else None)
                 )
-                cached_input_tokens = int(prompt_details.get("cached_tokens", 0))
-                cost = self._cost(input_tokens, output_tokens)
-                await self._ledger.settle(cost)
-                settled = True
+                if cached_input_tokens < 0 or cached_input_tokens > input_tokens:
+                    raise TeacherAPIError(
+                        "cached_tokens 不在 prompt_tokens 范围内",
+                        error_code="api_invalid_response",
+                        cost_usd=cost,
+                    )
                 return LLMCompletion(
                     action=action,
+                    action_text=action_text,
                     response_id=str(raw["id"]) if raw.get("id") is not None else None,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
@@ -385,6 +467,9 @@ class LLMClient:
                         if first.get("finish_reason") is not None
                         else None
                     ),
+                    response_format=response_format,
+                    normalization_error=normalization_error,
+                    reasoning_present=has_reasoning,
                 )
         finally:
             if not settled:

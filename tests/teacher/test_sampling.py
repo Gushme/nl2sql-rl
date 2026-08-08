@@ -124,3 +124,33 @@ def test_sampling_plan_satisfies_cross_quotas_and_is_deterministic() -> None:
         ComplexityBucket.MODERATE: 10,
         ComplexityBucket.CHALLENGING: 4,
     }
+
+
+def test_sampling_manifest_binds_actor_and_hidden_answer_content() -> None:
+    tasks, answers = _plan_fixtures()
+    baseline = build_sampling_plan(
+        tasks,
+        answers,
+        split_targets={"train": 10, "validation": 10},
+        seed=42,
+    )
+    changed_tasks = list(tasks)
+    changed_tasks[0] = changed_tasks[0].model_copy(update={"question": "已修改的问题"})
+    changed_actor = build_sampling_plan(
+        changed_tasks,
+        answers,
+        split_targets={"train": 10, "validation": 10},
+        seed=42,
+    )
+    changed_answers = list(answers)
+    changed_answers[0] = changed_answers[0].model_copy(
+        update={"gold_sql": "SELECT name FROM items ORDER BY name"}
+    )
+    changed_gold = build_sampling_plan(
+        tasks,
+        changed_answers,
+        split_targets={"train": 10, "validation": 10},
+        seed=42,
+    )
+    assert changed_actor.manifest_hash != baseline.manifest_hash
+    assert changed_gold.manifest_hash != baseline.manifest_hash

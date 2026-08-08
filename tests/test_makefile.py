@@ -26,6 +26,8 @@ PUBLIC_TARGETS = {
     "cpu-e2e",
     "pipeline-cpu",
     "teacher-plan",
+    "teacher-harness-preflight",
+    "teacher-probe",
     "teacher-collect",
     "teacher-build-sft",
     "sft-preflight",
@@ -84,7 +86,7 @@ def test_cpu_pipeline_dry_run_contains_no_external_or_gpu_action() -> None:
 
 @pytest.mark.parametrize(
     "target",
-    ["teacher-collect", "sft-run", "sft-export", "grpo-run"],
+    ["teacher-probe", "teacher-collect", "sft-run", "sft-export", "grpo-run"],
 )
 def test_external_and_gpu_targets_require_explicit_confirmation(target: str) -> None:
     result = _make(target, "CONFIRM=0")
@@ -100,6 +102,8 @@ def test_external_and_gpu_targets_require_explicit_confirmation(target: str) -> 
 def test_teacher_requires_api_key_and_explicit_cost_limit_after_confirmation() -> None:
     environment = dict(os.environ)
     environment.pop("TEACHER_API_KEY", None)
+    environment.pop("TEACHER_INPUT_PRICE_PER_MILLION", None)
+    environment.pop("TEACHER_OUTPUT_PRICE_PER_MILLION", None)
     missing_key = subprocess.run(
         [
             "make",
@@ -141,3 +145,25 @@ def test_teacher_requires_api_key_and_explicit_cost_limit_after_confirmation() -
     )
     assert "fixture-secret" not in missing_cost.stdout + missing_cost.stderr
     assert "teacher collect" not in missing_cost.stdout + missing_cost.stderr
+
+    missing_price = subprocess.run(
+        [
+            "make",
+            "teacher-collect",
+            "CONFIRM=1",
+            "TEACHER_ENDPOINT=https://teacher.invalid/v1",
+            "TEACHER_MODEL=fixture",
+            "TEACHER_COST_LIMIT_USD=1",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    assert missing_price.returncode != 0
+    assert "TEACHER_INPUT_PRICE_PER_MILLION" in (
+        missing_price.stdout + missing_price.stderr
+    )
+    assert "fixture-secret" not in missing_price.stdout + missing_price.stderr
+    assert "teacher collect" not in missing_price.stdout + missing_price.stderr

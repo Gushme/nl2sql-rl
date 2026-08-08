@@ -35,7 +35,7 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     gold_timeout_seconds: float = Field(default=10.0, gt=0)
-    exploration_timeout_seconds: float = Field(default=2.0, gt=0)
+    exploration_timeout_seconds: float = Field(default=10.0, gt=0)
     max_database_workers: int = Field(default=4, ge=1, le=32)
     max_episode_actions: int = Field(default=10, ge=1, le=100)
     max_action_tokens: int = Field(default=512, ge=16)

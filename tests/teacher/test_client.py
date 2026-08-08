@@ -7,12 +7,16 @@ from typing import Any
 import httpx
 import pytest
 
+from nl2sql_rl.models import AgentAction
 from nl2sql_rl.teacher.client import (
     CostLimitExceeded,
     LLMClient,
     LLMClientConfig,
+    LLMCompletion,
+    TeacherAPIError,
     api_compatible_messages,
 )
+from nl2sql_rl.teacher.probe import run_function_call_probe
 
 
 def _response(
@@ -177,6 +181,141 @@ async def test_client_retries_429_5xx_and_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_native_tool_call_becomes_protocol_input_not_api_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "invalid_1",
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "unknown_tool",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    async with LLMClient(
+        _config(),
+        api_key="mock",
+        cost_limit_usd=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        completion = await client.complete_action([])
+    assert completion.action is None
+    assert completion.action_text is not None
+    assert "unknown_tool" in completion.action_text
+    assert completion.normalization_error is not None
+    assert completion.response_format == "native_tool_call"
+
+
+@pytest.mark.asyncio
+async def test_authentication_error_is_fatal_and_classified() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, request=request)
+
+    async with LLMClient(
+        _config(),
+        api_key="mock",
+        cost_limit_usd=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(TeacherAPIError) as captured:
+            await client.complete_action([])
+    assert captured.value.error_code == "authentication_error"
+    assert captured.value.request_sent is True
+
+
+@pytest.mark.asyncio
+async def test_real_response_requires_token_usage() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "missing_usage",
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"action":"list_tables","arguments":{}}'
+                        }
+                    }
+                ],
+            },
+        )
+
+    async with LLMClient(
+        _config(real_api=True),
+        api_key="mock",
+        cost_limit_usd=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(TeacherAPIError) as captured:
+            await client.complete_action([])
+    assert captured.value.error_code == "api_invalid_response"
+
+
+@pytest.mark.asyncio
+async def test_function_probe_requires_native_call_and_reasoning_breakdown() -> None:
+    class ProbeClient:
+        config_hash = "probe"
+
+        def __init__(self, completion: LLMCompletion) -> None:
+            self.completion = completion
+
+        async def complete_action(
+            self, messages: list[dict[str, Any]], *, max_tokens: int | None = None
+        ) -> LLMCompletion:
+            assert messages and max_tokens is None
+            return self.completion
+
+    action = AgentAction(action="list_tables", arguments={})
+    text_report = await run_function_call_probe(
+        ProbeClient(
+            LLMCompletion(
+                action=action,
+                response_id="text",
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                response_format="text_json",
+            )
+        )
+    )
+    assert text_report["ok"] is False
+    assert text_report["error_code"] == "native_tool_call_not_used"
+
+    missing_breakdown = await run_function_call_probe(
+        ProbeClient(
+            LLMCompletion(
+                action=action,
+                response_id="thinking",
+                input_tokens=1,
+                output_tokens=2,
+                cost_usd=0.0,
+                response_format="native_tool_call",
+                reasoning_present=True,
+            )
+        )
+    )
+    assert missing_breakdown["ok"] is False
+    assert missing_breakdown["error_code"] == "reasoning_token_breakdown_missing"
+
+
+@pytest.mark.asyncio
 async def test_client_enforces_concurrency_limit() -> None:
     active = 0
     maximum = 0
@@ -217,6 +356,24 @@ async def test_cost_cap_blocks_request_before_external_call() -> None:
         with pytest.raises(CostLimitExceeded):
             await client.complete_action([])
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_actual_request_cost_cannot_exceed_reservation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(request, content='{"action":"list_tables","arguments":{}}')
+
+    async with LLMClient(
+        _config(max_request_cost_usd=0.0001),
+        api_key="mock",
+        cost_limit_usd=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(CostLimitExceeded) as captured:
+            await client.complete_action([])
+    assert captured.value.request_sent is True
+    assert captured.value.cost_usd == pytest.approx(0.00014)
+    assert client.spent_usd == pytest.approx(0.00014)
 
 
 def test_internal_tool_observation_becomes_qwen_compatible_user_message() -> None:

@@ -98,6 +98,9 @@ class EpisodeResult(StrictRecord):
     reward: float | None = None
     valid_for_training: bool = True
     usage: dict[str, int] = Field(default_factory=dict)
+    database_sha256: str | None = None
+    infrastructure_error_code: str | None = None
+    infrastructure_request_sent: bool | None = None
     config_hash: str
 
 
