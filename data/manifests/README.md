@@ -19,6 +19,7 @@
 - `teacher_pilot_transport_v2_canary_summary.json`：禁用并行 tool call 后的真实 canary 脱敏诊断，记录单条样本误触发比例阈值及累计 Token 用量。
 - `teacher_pilot_transport_v2_partial_summary.json`：Transport v2 追加 8 条后的脱敏诊断，记录合格率、Harness 指标、单次 4xx 暂停和累计 Token 用量。
 - `teacher_pilot_transport_v2_window20_summary.json`：Transport v2 满 20 条诊断窗口，记录 35% 合格率、暂停原因、Gold 对照诊断和确定性 replay。
+- `teacher_pilot_transport_v3_window20_summary.json`：Harness v3 满 20 条诊断窗口，记录 45% 合格率、v2/v3 同题对照、Wilson 可行性上界、确定性 replay 和累计 Token 用量。
 
 完整的 Actor task、隐藏 answer、partial checkpoint 和运行缓存位于被 Git 忽略的
 `outputs/data/`。Train 清单可由 `nl2sql-rl data clean-train --resume` 重建；Dev 清单可由

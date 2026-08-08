@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_pilot_transport_v3_window20",
+  "run_date": "2026-08-08",
+  "model": "deepseek-v4-flash-0731",
+  "project_git_sha_at_request": "ca1cc94a3aa8bbd4e0add7def6914f04e7007ec0",
+  "harness_version": "teacher-harness-v3",
+  "harness_config_hash": "e8cc17b628985fd958340f53a5d9b1dd700ce0a0f6442d1d894391acd0b835a5",
+  "visible_protocol_hash": "7f82fbbf1d3f51829538584c430101ef98237f78a030fb00e0fd6800a026c6b2",
+  "teacher_client_config_hash": "25e96ea58af073fcc12f5981108b48c1fe483814a57804549e3e998e522e2842",
+  "teacher_behavior_hash": "765ef77d648ca8b84f541bfb4a2049eaaccf3ee2f9134032ef853ddb6a5e3d7c",
+  "collection_config_hash": "504112759baed56df9039647ce94bf7d827c776b0635c61643fef17235976d2d",
+  "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
+  "migration_from_v2": {
+    "eligible": 8,
+    "migrated": 0,
+    "rejected_for_visible_prompt_change": 8
+  },
+  "paid_task_attempts": 20,
+  "attempted_by_split": {
+    "train": 18,
+    "validation": 2
+  },
+  "attempted_by_complexity": {
+    "simple": 6,
+    "moderate": 11,
+    "challenging": 3
+  },
+  "accepted": 9,
+  "acceptance_rate": 0.45,
+  "accepted_by_split": {
+    "train": 8,
+    "validation": 1
+  },
+  "accepted_by_complexity": {
+    "simple": 2,
+    "moderate": 7,
+    "challenging": 0
+  },
+  "rejection_reasons": {
+    "execution_not_correct": 9,
+    "model_or_request_error": 1,
+    "tool_error:syntax_error": 1
+  },
+  "ex_correct_but_rejected_for_trace_error": 1,
+  "responses": {
+    "total": 112,
+    "native_tool_call": 59,
+    "text_json": 53,
+    "normalization_failed": 0,
+    "protocol_attempts": 0,
+    "invalid_argument_attempts": 0,
+    "multiple_native_tool_calls": 0,
+    "finish_reason_stop": 53,
+    "finish_reason_tool_calls": 59,
+    "finish_reason_length": 0
+  },
+  "harness_metrics": {
+    "schema_calls": 21,
+    "schema_without_columns": 0,
+    "schema_truncated": 0,
+    "schema_with_omitted_tables": 0,
+    "execute_sql_calls": 35,
+    "execute_sql_timeouts": 0,
+    "execute_sqlite_errors": 1,
+    "unverified_submissions": 2,
+    "attempts_with_tool_error": 3,
+    "corrected_final_results": 1,
+    "loop_or_max_actions": 0,
+    "repeated_tool_calls": 0,
+    "action_count_mean": 5.6,
+    "action_count_p50": 5.0,
+    "action_count_p95": 8.0
+  },
+  "context_tokens": {
+    "semantics": "max_qwen_chatml_before_request",
+    "mean": 2620.65,
+    "p50": 2532.0,
+    "p95": 4113.0,
+    "max_observed": 4902
+  },
+  "provider_errors": {
+    "data_inspection_failed": 1,
+    "classification": "task_specific_provider_content_inspection",
+    "message_saved": false
+  },
+  "hidden_gold_diagnosis": {
+    "wrong_result_attempts": 9,
+    "gold_tables_fully_described": 9,
+    "prediction_physical_table_set_matches_gold": 8
+  },
+  "v2_v3_common_task_comparison": {
+    "common_tasks": 19,
+    "accepted_both": 7,
+    "accepted_v2_only": 0,
+    "accepted_v3_only": 2,
+    "accepted_neither": 10,
+    "ex_correct_both": 9,
+    "ex_correct_v2_only": 1,
+    "ex_correct_v3_only": 1,
+    "ex_correct_neither": 8
+  },
+  "deterministic_replay": {
+    "accepted_checked": 9,
+    "event_mismatches": 0,
+    "database_sha_mismatches": 0,
+    "accepted_invariant_violations": 0
+  },
+  "token_usage": {
+    "v3_input_tokens": 245817,
+    "v3_output_tokens": 20579,
+    "v3_reasoning_tokens_subset_of_output": 13360,
+    "v3_total_tokens": 266396,
+    "campaign_attempts_including_probe": 45,
+    "campaign_total_tokens": 568823,
+    "campaign_token_limit": 1000000,
+    "campaign_remaining_tokens": 431177
+  },
+  "pilot_early_projection": {
+    "required_acceptance_rate": 0.75,
+    "observed_acceptance_rate": 0.45,
+    "wilson_95_upper_acceptance_rate": 0.6579146575496577,
+    "projected_attempts_observed": 2222.222222222222,
+    "projected_attempts_wilson_upper": 1519.9539765908355,
+    "campaign_max_attempts": 1500
+  },
+  "collector_pause_reasons_at_run": [],
+  "campaign_decision": "paused_after_window_review",
+  "effective_pause_reasons": [
+    "pilot_acceptance_upper_bound_lt_75pct"
+  ],
+  "pilot_acceptance_target_met": false,
+  "diagnosis": {
+    "action_transport": "working_as_designed",
+    "schema_paging": "working_as_designed",
+    "execute_timeout": "working_as_designed",
+    "trace_discipline": "improved_over_v2",
+    "semantic_ex_accuracy": "no_net_gain_on_common_tasks",
+    "recommended_next_step": "use_a_stronger_teacher_model_without_weakening_acceptance"
+  },
+  "reasoning_content_saved": false
+}

@@ -25,6 +25,10 @@
 - Transport v2 已完成 20 条付费诊断窗口：7 条合格，35% 合格率，连同迁移轨迹共 8 条；协议/参数错误率和 SQL 探索超时率按阈值暂停。预测 SQL 在现行 10 秒探索上限下超时，对应 Gold 在更严格的 5 秒限制内两次约 0.12 秒完成；9 条结果错误也都已经看到 Gold 所需物理表，因此不放宽执行超时或 schema 门禁。8 条合格轨迹逐事件 replay 全部一致，数据库 SHA 无变化；活动累计使用 302,427 / 1,000,000 Token。
 - 当前 Harness v3 强化单 Action、参数层级、语义字段映射、SQLite 方言和结果复核指令，并把上下文监控改为“单轮最大 Qwen ChatML token”；v2 历史 P95 实际为 3,977，而非多轮累计值。Prompt 改变使 v2 的 8 条合格轨迹全部不具备迁移资格，最终 SFT 不会跨版本混合。
 - Harness v3 已按真实分层前缀完成 100 条隐藏 Gold 预检，90/10 split 与 30/50/20 复杂度配比全部通过，数据库 SHA 无变化；v2 的 8 条合格轨迹迁移检查全部按预期拒绝。
+- Harness v3 已完成 20 条真实付费窗口：9 条严格合格，合格率 45%；协议/参数/并行 Action 错误均为 0，schema 无列丢失或截断，35 次 SQL 探索无超时。9 条合格轨迹逐事件 replay 全部一致，数据库 SHA 无变化。
+- v2/v3 的 19 条同题对照显示 v3 多得到 2 条满足轨迹纪律的样本，但语义 EX 没有净提升；v3 的 9 条错误结果均已看到 Gold 所需物理表，故当前瓶颈判定为 Teacher 语义能力而非 Harness 容量。
+- v3 实测合格率的 95% Wilson 上界为 65.79%，按乐观上界完成 1,000 条仍需约 1,519.95 次，超过 1,500 次上限。采集已按质量门禁暂停；活动累计使用 568,823 / 1,000,000 Token，剩余 431,177 Token，等待更强 Teacher 模型或用户显式修改约束。
+- 断点续采现在会在任何新请求前重算已有 20 条以上窗口并 replay 合格轨迹；同一任务跨版本复现的一次供应商 `data_inspection_failed` 也已单独脱敏分类，不保存供应商错误消息。
 
 权威机器可读结果见 `data/manifests/` 下的 Train/Dev inventory、审计 summary、
 `split_manifest.json`、`leakage_report.json`、Teacher 预检/Pilot 摘要和模型依赖清单。
@@ -43,7 +47,7 @@ uv run nl2sql-rl data split
 
 ## 本轮未执行
 
-- 完整 100 次真实 Teacher Pilot 与 1,000 条轨迹采集；
+- 剩余 80 次 Pilot 与 1,000 条合格轨迹采集；当前 v3 窗口因统计上不可满足既定质量/尝试门槛而暂停；
 - Base、SFT、GRPO 模型推理；
 - GPU SFT、checkpoint 合并和 GPU GRPO；
 - LLM 行为 Judge。

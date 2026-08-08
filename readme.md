@@ -31,6 +31,10 @@ Transport v2 随后追加 8 条付费尝试，其中 4 条合格；连同迁移�
 
 Transport v2 的 20 条付费诊断窗口已完成：7 条合格，合格率 35%；连同迁移轨迹共 8 条。窗口因协议/参数错误率和 SQL 探索超时率超过阈值而暂停。预测 SQL 在现行 10 秒探索上限下超时，而对应 Gold 在更严格的 5 秒限制下两次约 0.12 秒完成，故不放宽 10 秒上限；9 条结果错误均已展示 Gold 所需物理表，schema 分页也没有丢失列信息，主要瓶颈是 Teacher 的 Action 纪律与语义推理，而不是只读执行器容量。8 条合格轨迹逐事件 replay 全部一致，数据库 SHA 无变化。活动累计使用 302,427 / 1,000,000 Token；脱敏证据见 `data/manifests/teacher_pilot_transport_v2_window20_summary.json`。
 
+Harness v3 的 20 条付费诊断窗口随后完成：9 条严格合格，合格率 45%。112 次响应中没有 Action 解析、参数、并行 tool call 或长度终止错误；21 次 schema observation 全部保留列信息，35 次 SQL 探索没有超时，9 条合格轨迹逐事件 replay 全部一致且数据库 SHA 无变化。19 条 v2/v3 同题对照中，v3 多得到 2 条合格轨迹，但两版各自独有 1 条 EX 正确结果，语义 EX 没有净提升；v3 的 9 条错误结果全部已看到 Gold 所需物理表。由此确认 Harness 的协议、schema 和执行容量合理，当前主要瓶颈是 Teacher 的 SQL 语义能力。
+
+窗口实测 9/20 后，95% Wilson 合格率上界为 65.79%；即使按这个乐观上界，完成 1,000 条仍预计需要约 1,519.95 次，超过 1,500 次活动上限，也未达到 75% Pilot 门槛。采集因此暂停，没有为消耗额度而继续请求。当前活动累计使用 568,823 / 1,000,000 Token，剩余 431,177 Token；下一步应更换更强 Teacher，或由用户显式修改质量门槛/尝试上限。一条相同任务跨版本复现的供应商 `data_inspection_failed` 已单独脱敏分类，不记录错误消息。完整证据见 `data/manifests/teacher_pilot_transport_v3_window20_summary.json`。
+
 ## 1. Fresh clone
 
 CPU 开发环境固定使用 Python 3.11 和 uv。本项目额外兼容 Python 3.12，仅用于固定的 veRL GPU 容器；本机 Python 3.13 不作为运行环境。
@@ -221,7 +225,7 @@ uv run nl2sql-rl teacher collect \
   --confirm-real-api
 ```
 
-采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时。活动账本 `campaign_state.json` 跨运行、跨 Harness 版本累计探针与正式请求，1,500 次尝试、Token 上限和可选费用上限都不会因升级或续采重置。每 100 次尝试冻结一个诊断批次；协议、截断、执行超时和循环等请求后错误率至少累计 20 条后评价，首 20 条无合格轨迹以及上下文溢出、schema 信息丢失、replay 不一致、数据库 SHA 改变、预算耗尽或系统性 API 异常等硬性异常仍会立即停止后续请求。
+采集器按 task 和 Harness 版本幂等、断点续采，处理 429、5xx 和超时。活动账本 `campaign_state.json` 跨运行、跨 Harness 版本累计探针与正式请求，1,500 次尝试、Token 上限和可选费用上限都不会因升级或续采重置。每 100 次尝试冻结一个诊断批次；协议、截断、执行超时和循环等请求后错误率至少累计 20 条后评价。从第 20 条起还会用 95% Wilson 合格率上界检查 75% Pilot 门槛，明显无法在 1,500 次内完成配额时提前停止。恢复采集时先诊断断点中已有窗口并 replay 合格轨迹，确认无暂停原因后才允许发出下一次 API 请求；首 20 条无合格轨迹、上下文溢出、schema 信息丢失、replay 不一致、数据库 SHA 改变、预算耗尽或系统性 API 异常等硬性异常同样会停止后续请求。
 
 如果模型可见 Prompt、工具 schema、observation、超时、SQL Guard 或接受标准变化，必须使用新的 Harness 哈希和输出文件；Teacher 请求行为变化也必须生成新的采集配置哈希和输出文件。旧轨迹只有在初始 Actor 消息、可见协议、逐事件 observation、最终 SQL、Reward 和数据库 SHA 全部一致时才能迁移；否则任务回到原分层队列重新采集。活动账本保留所有 Teacher 行为哈希，并累计旧版本的尝试与 Token。最终 SFT 只接受一个采集配置哈希。
 
