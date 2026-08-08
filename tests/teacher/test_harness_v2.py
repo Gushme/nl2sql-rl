@@ -193,8 +193,11 @@ def test_gold_harness_preflight_saves_no_hidden_sql(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_protocol_rate_threshold_waits_for_twenty_attempts(tmp_path: Path) -> None:
-    tasks, answers = _fixtures(tmp_path, count=20)
+    tasks, answers = _fixtures(tmp_path, count=40)
     client = InvalidProtocolClient()
+    first_config = _config(total=20).model_copy(
+        update={"diagnostic_batch_size": 100}
+    )
     summary = await collect_trajectories(
         tasks,
         answers,
@@ -202,13 +205,14 @@ async def test_protocol_rate_threshold_waits_for_twenty_attempts(tmp_path: Path)
         tmp_path / "invalid.jsonl",
         client,
         runtime=RuntimeConfig(),
-        config=_config(total=20),
+        config=first_config,
         tokenizer=CharacterTokenizer(),
         diagnostics_dir=tmp_path / "diagnostics",
     )
     assert summary["paused"] is True
     assert "protocol_or_argument_error_rate_gt_5pct" in summary["pause_reasons"]
     assert "first_20_without_accepted" in summary["pause_reasons"]
+    assert "pilot_acceptance_upper_bound_lt_75pct" in summary["pause_reasons"]
     assert summary["attempts"] == 20
     assert len(read_jsonl(tmp_path / "invalid.jsonl")) == 20
     assert summary["latest_diagnostics"]["rate_threshold_sample_ready"] is True
@@ -221,6 +225,28 @@ async def test_protocol_rate_threshold_waits_for_twenty_attempts(tmp_path: Path)
         summary["latest_diagnostics"]["finish_reasons"]["missing_or_legacy"]
         == summary["latest_diagnostics"]["response_calls"]
     )
+    projection = summary["latest_diagnostics"]["pilot_early_projection"]
+    assert projection is not None
+    assert projection["wilson_95_upper_acceptance_rate"] < 0.75
+
+    calls_before_resume = client.calls
+    resumed = await collect_trajectories(
+        tasks,
+        answers,
+        tmp_path,
+        tmp_path / "invalid.jsonl",
+        client,
+        runtime=RuntimeConfig(),
+        config=first_config.model_copy(
+            update={"max_attempts": 40, "run_attempt_limit": 1}
+        ),
+        tokenizer=CharacterTokenizer(),
+        diagnostics_dir=tmp_path / "diagnostics",
+    )
+    assert resumed["attempts_this_run"] == 0
+    assert client.calls == calls_before_resume
+    assert len(read_jsonl(tmp_path / "invalid.jsonl")) == 20
+    assert "pilot_acceptance_upper_bound_lt_75pct" in resumed["pause_reasons"]
 
 
 @pytest.mark.asyncio

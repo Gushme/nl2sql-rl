@@ -451,6 +451,50 @@ async def collect_trajectories(
             database_size_bytes=(db_root / task.db_ref).stat().st_size,
         )
 
+    def diagnose_current_batch(*, replay_accepted: bool) -> dict[str, Any]:
+        """统一补齐诊断元数据，确保续采前和批次内使用相同门禁。"""
+        diagnostics = diagnose_attempts(
+            current_diagnostic_batch,
+            tasks=tasks,
+            answers=answers,
+            db_root=db_root,
+            runtime=runtime,
+            replay_accepted=replay_accepted,
+            cost_limit_usd=(
+                campaign_state.cost_limit_usd if campaign_state is not None else None
+            ),
+            spent_usd=client.spent_usd,
+            token_limit=_client_token_limit(client),
+            used_tokens=_client_used_tokens(client),
+            tokenizer=tokenizer,
+            target_total=config.target_total,
+            max_attempts=config.max_attempts,
+        )
+        diagnostics.update(
+            {
+                "config_hash": collection_hash,
+                "harness_config_hash": current_harness_hash,
+                "visible_protocol_hash": current_visible_protocol_hash,
+                "sampling_manifest_hash": plan.manifest_hash,
+                "teacher_client_config_hash": client.config_hash,
+                "teacher_behavior_hash": _client_behavior_hash(client),
+                "pricing_hash": getattr(client, "pricing_config_hash", None),
+                "campaign_attempts": campaign_attempts,
+                "version_attempts": len(version_paid_attempts),
+                "spent_usd": client.spent_usd,
+                "used_tokens": _client_used_tokens(client),
+                "token_limit": _client_token_limit(client),
+            }
+        )
+        return diagnostics
+
+    # 断点中可能已有未满 100 条的冻结窗口；必须先判定，不能冒险多发一轮请求。
+    if len(current_diagnostic_batch) >= 20:
+        latest_diagnostics = diagnose_current_batch(replay_accepted=True)
+        pause_reasons.extend(
+            str(value) for value in latest_diagnostics["pause_reasons"]
+        )
+
     while (
         not scheduler.complete
         and campaign_attempts < config.max_attempts
@@ -496,37 +540,7 @@ async def collect_trajectories(
         if not current_diagnostic_batch:
             continue
         batch_complete = len(current_diagnostic_batch) >= config.diagnostic_batch_size
-        latest_diagnostics = diagnose_attempts(
-            current_diagnostic_batch,
-            tasks=tasks,
-            answers=answers,
-            db_root=db_root,
-            runtime=runtime,
-            replay_accepted=batch_complete,
-            cost_limit_usd=(
-                campaign_state.cost_limit_usd if campaign_state is not None else None
-            ),
-            spent_usd=client.spent_usd,
-                token_limit=_client_token_limit(client),
-                used_tokens=_client_used_tokens(client),
-                tokenizer=tokenizer,
-            )
-        latest_diagnostics.update(
-            {
-                "config_hash": collection_hash,
-                "harness_config_hash": current_harness_hash,
-                "visible_protocol_hash": current_visible_protocol_hash,
-                "sampling_manifest_hash": plan.manifest_hash,
-                "teacher_client_config_hash": client.config_hash,
-                "teacher_behavior_hash": _client_behavior_hash(client),
-                "pricing_hash": getattr(client, "pricing_config_hash", None),
-                "campaign_attempts": campaign_attempts,
-                "version_attempts": len(version_paid_attempts),
-                "spent_usd": client.spent_usd,
-                "used_tokens": _client_used_tokens(client),
-                "token_limit": _client_token_limit(client),
-            }
-        )
+        latest_diagnostics = diagnose_current_batch(replay_accepted=batch_complete)
         pause_reasons.extend(str(value) for value in latest_diagnostics["pause_reasons"])
         if batch_complete:
             if len(version_paid_attempts) == config.diagnostic_batch_size:

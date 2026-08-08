@@ -337,6 +337,37 @@ async def test_authentication_error_is_fatal_and_classified() -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_data_inspection_failure_is_task_specific() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            request=request,
+            json={
+                "error": {
+                    "code": "data_inspection_failed",
+                    "type": "data_inspection_failed",
+                    "message": "不得落盘的内容审查消息",
+                }
+            },
+        )
+
+    async with LLMClient(
+        _config(),
+        api_key="mock",
+        cost_limit_usd=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(TeacherAPIError) as captured:
+            await client.complete_action([])
+    assert captured.value.error_code == "provider_data_inspection_failed"
+    assert captured.value.diagnostic_detail == {
+        "status_code": 400,
+        "provider_code": "data_inspection_failed",
+        "provider_type": "data_inspection_failed",
+    }
+
+
+@pytest.mark.asyncio
 async def test_real_response_requires_token_usage() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

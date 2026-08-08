@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Sequence
+from math import sqrt
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,25 @@ def _usage_summary(values: list[float]) -> dict[str, float]:
         "p50": _percentile(values, 0.50),
         "p95": _percentile(values, 0.95),
     }
+
+
+def _wilson_upper_bound(successes: int, total: int) -> float:
+    """计算 95% Wilson 上界，用保守统计证据提前阻止明显不可行的 Pilot。"""
+    if total <= 0:
+        return 1.0
+    z = 1.959963984540054
+    rate = successes / total
+    denominator = 1 + z * z / total
+    center = (rate + z * z / (2 * total)) / denominator
+    half_width = (
+        z
+        * sqrt(
+            rate * (1 - rate) / total
+            + z * z / (4 * total * total)
+        )
+        / denominator
+    )
+    return min(1.0, center + half_width)
 
 
 def _group_metrics(
@@ -259,6 +279,9 @@ def diagnose_attempts(
     token_limit: int | None = None,
     used_tokens: int | None = None,
     tokenizer: TokenizerLike | None = None,
+    target_total: int = 1_000,
+    max_attempts: int = 1_500,
+    pilot_acceptance_target: float = 0.75,
 ) -> dict[str, Any]:
     """统计一个批次；只有 accepted 轨迹参与确定性 replay 门禁。"""
     total = len(attempts)
@@ -479,6 +502,20 @@ def diagnose_attempts(
     rate_sample_ready = total >= 20
     if rate_sample_ready and protocol_or_argument_attempts / total > 0.05:
         pause_reasons.append("protocol_or_argument_error_rate_gt_5pct")
+    pilot_early_projection: dict[str, float] | None = None
+    if rate_sample_ready:
+        observed_rate = accepted_count / total
+        upper_rate = _wilson_upper_bound(accepted_count, total)
+        pilot_early_projection = {
+            "observed_acceptance_rate": observed_rate,
+            "wilson_95_upper_acceptance_rate": upper_rate,
+            "required_pilot_acceptance_rate": pilot_acceptance_target,
+            "projected_attempts_observed": target_total / max(observed_rate, 1e-12),
+            "projected_attempts_wilson_upper": target_total / upper_rate,
+            "campaign_max_attempts": float(max_attempts),
+        }
+        if upper_rate < pilot_acceptance_target:
+            pause_reasons.append("pilot_acceptance_upper_bound_lt_75pct")
     if schema_no_columns:
         pause_reasons.append("schema_without_columns")
     if rate_sample_ready and schema_calls and schema_truncated / schema_calls > 0.05:
@@ -522,9 +559,18 @@ def diagnose_attempts(
         "api_client_error",
         "api_transport_error",
         "api_retry_exhausted",
+        "provider_data_inspection_failed",
     }
     systemic_api_errors = sum(
         infrastructure_codes[code] for code in systemic_candidate_codes
+    )
+    provider_data_inspection_failures = sum(
+        1
+        for attempt in attempts
+        if attempt.episode.infrastructure_error_code
+        == "provider_data_inspection_failed"
+        or attempt.episode.infrastructure_error_detail.get("provider_code")
+        == "data_inspection_failed"
     )
     repeated_systemic_code = any(
         infrastructure_codes[code] >= 2 for code in systemic_candidate_codes
@@ -562,6 +608,7 @@ def diagnose_attempts(
         "multiple_native_tool_call_responses": multiple_native_tool_call_responses,
         "invalid_text_action_responses": invalid_text_action_responses,
         "rate_threshold_sample_ready": rate_sample_ready,
+        "pilot_early_projection": pilot_early_projection,
         "native_tool_calls": native_tool_calls,
         "text_json_calls": text_json_calls,
         "response_calls": response_calls,
@@ -622,6 +669,7 @@ def diagnose_attempts(
         "infrastructure_codes": dict(sorted(infrastructure_codes.items())),
         "infrastructure_details": dict(sorted(infrastructure_details.items())),
         "systemic_api_error_attempts": systemic_api_errors,
+        "provider_data_inspection_failures": provider_data_inspection_failures,
         "replay": {
             "checked": replay_checked,
             "mismatches": replay_mismatches,

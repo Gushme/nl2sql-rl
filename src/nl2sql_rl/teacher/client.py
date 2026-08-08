@@ -484,8 +484,14 @@ class LLMClient:
                         if response.status_code < 400:
                             break
                         if response.status_code not in {429} and response.status_code < 500:
+                            diagnostic_detail = _provider_error_detail(response)
                             if response.status_code in {401, 403}:
                                 error_code = "authentication_error"
+                            elif (
+                                diagnostic_detail.get("provider_code")
+                                == "data_inspection_failed"
+                            ):
+                                error_code = "provider_data_inspection_failed"
                             elif response.status_code in {400, 404, 422}:
                                 error_code = "model_or_request_error"
                             else:
@@ -493,7 +499,7 @@ class LLMClient:
                             raise TeacherAPIError(
                                 f"Teacher 返回不可重试状态：{response.status_code}",
                                 error_code=error_code,
-                                diagnostic_detail=_provider_error_detail(response),
+                                diagnostic_detail=diagnostic_detail,
                             )
                     except (httpx.TimeoutException, httpx.TransportError):
                         if attempt >= self.config.max_retries:
