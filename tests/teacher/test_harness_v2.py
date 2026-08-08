@@ -81,12 +81,12 @@ class InvalidProtocolClient(GoodClient):
         self.calls += 1
         return LLMCompletion(
             action=None,
-            action_text="{}",
+            action_text="not-json",
             response_id=f"invalid_{self.calls}",
             input_tokens=10,
             output_tokens=2,
             cost_usd=0.0,
-            normalization_error="Action schema 不合法",
+            normalization_error="Action 不是合法 JSON：Expecting value",
         )
 
 
@@ -186,7 +186,7 @@ def test_gold_harness_preflight_saves_no_hidden_sql(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_protocol_threshold_pauses_before_twenty_attempts(tmp_path: Path) -> None:
+async def test_protocol_rate_threshold_waits_for_twenty_attempts(tmp_path: Path) -> None:
     tasks, answers = _fixtures(tmp_path, count=20)
     client = InvalidProtocolClient()
     summary = await collect_trajectories(
@@ -202,8 +202,11 @@ async def test_protocol_threshold_pauses_before_twenty_attempts(tmp_path: Path) 
     )
     assert summary["paused"] is True
     assert "protocol_or_argument_error_rate_gt_5pct" in summary["pause_reasons"]
-    assert summary["attempts"] == 2
-    assert len(read_jsonl(tmp_path / "invalid.jsonl")) == 2
+    assert "first_20_without_accepted" in summary["pause_reasons"]
+    assert summary["attempts"] == 20
+    assert len(read_jsonl(tmp_path / "invalid.jsonl")) == 20
+    assert summary["latest_diagnostics"]["rate_threshold_sample_ready"] is True
+    assert summary["latest_diagnostics"]["invalid_text_action_responses"] > 0
 
 
 @pytest.mark.asyncio

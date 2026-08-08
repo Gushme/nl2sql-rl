@@ -20,6 +20,7 @@
 - 实测 5 秒探索上限会让预检中的一条 Gold 偶发超时，因此在任何付费请求前把 `execute_sql` 探索上限调整为 10 秒，并写入新的 Harness 配置哈希 `b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4`。
 - 真实 Teacher Action 兼容性探针已完成：鉴权、thinking、reasoning token 明细和严格 JSON Action 均正常；模型以文本 JSON 返回合法 `list_tables` Action，共使用 783 Token，未保存思考内容。原先“必须原生 tool call”的探针判据与项目同时支持两种 Action 传输格式的协议不一致，已修正；模型可见 Harness 未改变。
 - 真实 Pilot transport v1 在 4 条任务后自动暂停：1 条合格，23 次响应中 2 次并行返回两个原生 tool call，累计使用 63,479 Token；schema 无截断、8 次 SQL 探索无超时或 SQLite 错误。客户端已固定 `parallel_tool_calls=false`，并将以新 Teacher 行为哈希和独立输出目录迁移唯一合格轨迹后续采。
+- Transport v2 canary 已完成旧轨迹确定性迁移，且 8 次新响应均未再出现并行 tool call；其中 1 次文本 Action 非法 JSON，整条轨迹仍被拒绝。监控现要求至少 20 条样本后再判断错误率阈值，避免 1/1 小样本误停；模型可见协议和接受标准没有变化。活动累计使用 89,170 / 1,000,000 Token。
 
 权威机器可读结果见 `data/manifests/` 下的 Train/Dev inventory、审计 summary、
 `split_manifest.json`、`leakage_report.json`、Teacher 预检/Pilot 摘要和模型依赖清单。

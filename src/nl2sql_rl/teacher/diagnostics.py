@@ -244,6 +244,7 @@ def diagnose_attempts(
     corrected_final_results = 0
     normalization_failures = 0
     multiple_native_tool_call_responses = 0
+    invalid_text_action_responses = 0
     native_tool_calls = 0
     text_json_calls = 0
     response_calls = 0
@@ -288,6 +289,10 @@ def diagnose_attempts(
                 message = event.observation.payload.get("message")
                 if isinstance(message, str) and "native_tool_call_count" in message:
                     multiple_native_tool_call_responses += 1
+                if isinstance(message, str) and message.startswith(
+                    "Action 不是合法 JSON"
+                ):
+                    invalid_text_action_responses += 1
             else:
                 tool_distribution[event.action.action] += 1
                 current_action = normalized_action(event.action)
@@ -399,15 +404,17 @@ def diagnose_attempts(
     pause_reasons: list[str] = []
     if total >= 20 and not any(attempt.accepted for attempt in attempts[:20]):
         pause_reasons.append("first_20_without_accepted")
-    if total and protocol_or_argument_attempts / total > 0.05:
+    # 比例阈值至少观察 20 条，避免 1/1 或 1/4 这类小样本误报。
+    rate_sample_ready = total >= 20
+    if rate_sample_ready and protocol_or_argument_attempts / total > 0.05:
         pause_reasons.append("protocol_or_argument_error_rate_gt_5pct")
     if schema_no_columns:
         pause_reasons.append("schema_without_columns")
-    if schema_calls and schema_truncated / schema_calls > 0.05:
+    if rate_sample_ready and schema_calls and schema_truncated / schema_calls > 0.05:
         pause_reasons.append("schema_truncation_rate_gt_5pct")
-    if execute_calls and execute_timeouts / execute_calls > 0.02:
+    if rate_sample_ready and execute_calls and execute_timeouts / execute_calls > 0.02:
         pause_reasons.append("execute_timeout_rate_gt_2pct")
-    if any(
+    if rate_sample_ready and any(
         group["execute_timeout_rate"] > 0.05
         for group in by_sampling_cell.values()
     ):
@@ -417,6 +424,7 @@ def diagnose_attempts(
         or attempt.episode.infrastructure_error_code == "context_overflow"
         for attempt in attempts
     )
+    # 上下文在请求前即可确定，首例溢出就应暂停以避免无意义继续调度。
     if total and context_overflows / total > 0.01:
         pause_reasons.append("context_overflow_rate_gt_1pct")
     loop_or_limit = sum(
@@ -424,7 +432,7 @@ def diagnose_attempts(
         in {TerminalReason.LOOP, TerminalReason.MAX_ACTIONS}
         for attempt in attempts
     )
-    if total and loop_or_limit / total > 0.05:
+    if rate_sample_ready and loop_or_limit / total > 0.05:
         pause_reasons.append("loop_or_max_actions_rate_gt_5pct")
     if replay_mismatches or database_sha_mismatches:
         pause_reasons.append("replay_or_database_sha_mismatch")
@@ -470,6 +478,8 @@ def diagnose_attempts(
         "protocol_or_argument_attempts": protocol_or_argument_attempts,
         "normalization_failures": normalization_failures,
         "multiple_native_tool_call_responses": multiple_native_tool_call_responses,
+        "invalid_text_action_responses": invalid_text_action_responses,
+        "rate_threshold_sample_ready": rate_sample_ready,
         "native_tool_calls": native_tool_calls,
         "text_json_calls": text_json_calls,
         "response_calls": response_calls,

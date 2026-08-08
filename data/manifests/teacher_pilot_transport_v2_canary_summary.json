@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "kind": "teacher_pilot_transport_v2_canary",
+  "run_date": "2026-08-08",
+  "model": "deepseek-v4-flash-0731",
+  "project_git_sha_at_request": "8ff6a8c22feca4efde823c166ca1121d501935c3",
+  "harness_version": "teacher-harness-v2",
+  "harness_config_hash": "b1a4977fc6ca9758e37e25770d9aa0a97b3920a425472ab13befec2da5359ba4",
+  "teacher_behavior_hash": "765ef77d648ca8b84f541bfb4a2049eaaccf3ee2f9134032ef853ddb6a5e3d7c",
+  "collection_config_hash": "ff9824fc09ab8c14ea39071f56e41bba9abb7bbeebf6a30c1e0bf95c81b6ecb9",
+  "sampling_manifest_hash": "01ef4397b8d00e07c0b3d0ee6ce7bd77492b4568f88eb27249912facb325e9d5",
+  "migrated_accepted_trajectories": 1,
+  "paid_task_attempts": 1,
+  "new_accepted": 0,
+  "accepted_total_including_migration": 1,
+  "new_rejection_reasons": {
+    "execution_not_correct": 1
+  },
+  "responses": {
+    "total": 8,
+    "native_tool_call": 2,
+    "text_json": 6,
+    "normalization_failed": 1,
+    "invalid_text_action": 1,
+    "multiple_native_tool_calls": 0
+  },
+  "harness_metrics": {
+    "schema_calls": 1,
+    "schema_without_columns": 0,
+    "schema_truncated": 0,
+    "execute_sql_calls": 4,
+    "execute_sql_timeouts": 0,
+    "execute_sqlite_errors": 0,
+    "unverified_submissions": 0,
+    "infrastructure_errors": 0
+  },
+  "token_usage": {
+    "canary_input_tokens": 16099,
+    "canary_output_tokens": 9592,
+    "canary_reasoning_tokens": 9226,
+    "canary_total_tokens": 25691,
+    "campaign_total_tokens": 89170,
+    "campaign_token_limit": 1000000,
+    "campaign_remaining_tokens": 910830
+  },
+  "paused": true,
+  "pause_reasons": [
+    "protocol_or_argument_error_rate_gt_5pct"
+  ],
+  "diagnosis": "rate_threshold_was_evaluated_on_one_attempt",
+  "remediation": "require_twenty_attempts_before_rate_thresholds",
+  "trajectory_acceptance_changed": false,
+  "model_visible_harness_changed": false,
+  "reasoning_content_saved": false
+}
