@@ -11,7 +11,7 @@
 - `split_manifest.json`：seed 42 固定的 Train 7,667、Validation 918 和 Dev Final-N 498 task/db 清单。
 - `leakage_report.json`：DB ID、数据库 SHA、task ID、标准化问题与近重复检查结果；本次全部为空。
 - `qwen_tokenizer_config.json`：固定模型 revision 的 tokenizer/config 文件哈希，明确无权重。
-- `verl_v0_8_0.json`：veRL release commit、AgentLoop 源码位置和 GPU 镜像 digest。
+- `verl_v0_8_0.json`：veRL release commit、AgentLoop/trainer 来源、GPU 镜像 digest，以及动态同奖组过滤补丁前后 SHA256。
 - `teacher_harness_preflight_summary.json`：按真实分层顺序对前 100 条隐藏 Gold 做当前 Harness v3 离线预检的汇总。
 - `teacher_harness_v2_preflight_summary.json`：升级 Prompt 前 Harness v2 的 100 条历史预检证据。
 - `teacher_api_probe_summary.json`：真实 Teacher Action 兼容性探针的无密钥、无思考内容摘要与累计 Token 账本快照。

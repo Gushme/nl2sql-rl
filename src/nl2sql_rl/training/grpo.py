@@ -16,8 +16,9 @@ import yaml
 from pydantic import Field, model_validator
 
 from nl2sql_rl.agent.loop import build_actor_messages
-from nl2sql_rl.io_utils import read_jsonl, sha256_file, stable_json, write_jsonl
+from nl2sql_rl.io_utils import read_jsonl, sha256_file, stable_json, write_json, write_jsonl
 from nl2sql_rl.models import AuditStatus, EpisodeResult, HiddenAnswer, StrictRecord, TaskView
+from nl2sql_rl.training.grpo_filter import DynamicGroupFilterConfig
 from nl2sql_rl.training.grpo_reward import adapt_episode_reward
 from nl2sql_rl.training.model_assets import BASE_MODEL, MODEL_REVISION
 
@@ -28,6 +29,13 @@ VERL_IMAGE = (
     "sha256:7b89de392419de3c532b96ea29bf7ac93a083ab965dbb4ec4252adf436d950c3"
 )
 AGENT_LOOP_NAME = "nl2sql_agent_loop"
+VERL_DYNAMIC_FILTER_PATCH_ID = "nl2sql-dynamic-group-filter-v1"
+VERL_RAY_TRAINER_SOURCE_SHA256 = (
+    "de58d295cf86656a28196b0718168d4a11666f3e30957b7e166914496c2a6d66"
+)
+VERL_PATCHED_RAY_TRAINER_SHA256 = (
+    "1de682b934bc07f36a6ef2813a0f0add66544f866cc4e7f0b0d4a07dc1f751cc"
+)
 
 
 class TokenizerLike(Protocol):
@@ -70,6 +78,9 @@ class GRPOConfig(StrictRecord):
     n_gpus_per_node: int = 1
     agent_workers: int = Field(default=4, ge=1, le=32)
     gpu_memory_utilization: float = Field(default=0.6, gt=0, lt=1)
+    dynamic_group_filter: DynamicGroupFilterConfig = Field(
+        default_factory=DynamicGroupFilterConfig
+    )
 
     @model_validator(mode="after")
     def validate_frozen_settings(self) -> GRPOConfig:
@@ -94,6 +105,7 @@ class GRPOConfig(StrictRecord):
             "max_actions": 10,
             "max_action_tokens": 512,
             "n_gpus_per_node": 1,
+            "dynamic_group_filter": DynamicGroupFilterConfig(),
         }
         for name, value in expected.items():
             if getattr(self, name) != value:
@@ -106,7 +118,31 @@ class GRPOConfig(StrictRecord):
 
     @property
     def nominal_rollouts(self) -> int:
+        """兼容旧报告字段，表示进入优化器的有效轨迹数。"""
         return self.total_steps * self.prompt_batch_size * self.group_size
+
+    @property
+    def retained_rollouts(self) -> int:
+        return self.nominal_rollouts
+
+    @property
+    def minimum_generated_rollouts(self) -> int:
+        return self.retained_rollouts
+
+    @property
+    def maximum_generated_rollouts(self) -> int:
+        return (
+            self.retained_rollouts
+            * self.dynamic_group_filter.max_generation_batches_per_update
+        )
+
+    @property
+    def maximum_candidate_prompts(self) -> int:
+        return (
+            self.total_steps
+            * self.prompt_batch_size
+            * self.dynamic_group_filter.max_generation_batches_per_update
+        )
 
     def resolved(self, config_dir: Path) -> GRPOConfig:
         path_names = (
@@ -146,6 +182,28 @@ def load_grpo_config(path: Path) -> GRPOConfig:
     if not isinstance(raw, dict):
         raise ValueError("GRPO 配置必须是 YAML mapping")
     return GRPOConfig.model_validate(raw).resolved(path.parent)
+
+
+def _project_root() -> Path:
+    """定位包含 pyproject.toml 的源码仓库，用于读取受控补丁。"""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    raise FileNotFoundError("无法定位 nl2sql-rl 项目根目录")
+
+
+def verl_patch_identity() -> dict[str, str]:
+    """返回会进入 run hash 的 veRL 补丁身份。"""
+    patch_path = _project_root() / "patches/verl-v0.8.0-dynamic-group-filter.patch"
+    if not patch_path.is_file():
+        raise FileNotFoundError(f"veRL 动态过滤补丁不存在：{patch_path}")
+    return {
+        "patch_id": VERL_DYNAMIC_FILTER_PATCH_ID,
+        "patch_path": str(patch_path),
+        "patch_sha256": sha256_file(patch_path),
+        "upstream_ray_trainer_sha256": VERL_RAY_TRAINER_SOURCE_SHA256,
+        "patched_ray_trainer_sha256": VERL_PATCHED_RAY_TRAINER_SHA256,
+    }
 
 
 def _handoff_hash(payload: dict[str, Any]) -> str:
@@ -345,6 +403,17 @@ def _gpu_runtime_report(config: GRPOConfig) -> dict[str, Any]:
     expected_digest = config.container_image.rsplit("@", maxsplit=1)[-1]
     if os.environ.get("NL2SQL_VERL_IMAGE_DIGEST") != expected_digest:
         raise RuntimeError("当前容器镜像 digest 未通过固定值校验")
+    patch_identity = verl_patch_identity()
+    if os.environ.get("NL2SQL_VERL_PATCH_SHA256") != patch_identity["patch_sha256"]:
+        raise RuntimeError("NL2SQL_VERL_PATCH_SHA256 未设置或与受控补丁不一致")
+    trainer_file = Path(str(getattr(verl, "__file__", ""))).resolve().parent / (
+        "trainer/ppo/ray_trainer.py"
+    )
+    if not trainer_file.is_file():
+        raise RuntimeError("无法定位已安装的 veRL ray_trainer.py")
+    installed_trainer_sha256 = sha256_file(trainer_file)
+    if installed_trainer_sha256 != VERL_PATCHED_RAY_TRAINER_SHA256:
+        raise RuntimeError("已安装的 veRL trainer 未通过动态过滤补丁哈希校验")
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
         raise RuntimeError("正式 GRPO 需要支持 BF16 的 NVIDIA CUDA GPU")
     capability = tuple(int(value) for value in torch.cuda.get_device_capability(0))
@@ -357,6 +426,9 @@ def _gpu_runtime_report(config: GRPOConfig) -> dict[str, Any]:
         "cuda_version": torch.version.cuda,
         "gpu": torch.cuda.get_device_name(0),
         "compute_capability": list(capability),
+        "dynamic_filter_patch": patch_identity,
+        "installed_ray_trainer": str(trainer_file),
+        "installed_ray_trainer_sha256": installed_trainer_sha256,
     }
 
 
@@ -367,6 +439,7 @@ def grpo_run_hash(
         "config": config.model_dump(mode="json"),
         "data": data_report,
         "handoff_hash": handoff["handoff_hash"],
+        "verl_patch": verl_patch_identity(),
     }
     return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
 
@@ -375,6 +448,7 @@ def preflight_grpo(config: GRPOConfig, *, dry_run: bool) -> dict[str, Any]:
     _, data_report = inspect_grpo_data(config)
     _validate_agent_loop_config(config.agent_loop_config)
     handoff = validate_sft_handoff(config.checkpoint_dir)
+    patch_identity = verl_patch_identity()
     dependencies = {
         name: importlib.util.find_spec(name) is not None
         for name in ("torch", "verl", "vllm", "ray")
@@ -393,12 +467,27 @@ def preflight_grpo(config: GRPOConfig, *, dry_run: bool) -> dict[str, Any]:
             "sha256": actual_hash,
             "matches_source": actual_hash == expected_hash,
         }
+    train_prompt_count = int(data_report["train"]["count"])
+    candidate_pool_sufficient = train_prompt_count >= config.maximum_candidate_prompts
+    if not dry_run and not candidate_pool_sufficient:
+        raise ValueError(
+            "GRPO 训练池不足以覆盖动态过滤最坏情况："
+            f"{train_prompt_count} < {config.maximum_candidate_prompts}"
+        )
     return {
         "schema_version": 1,
         "dry_run": dry_run,
         "run_hash": grpo_run_hash(config, data_report, handoff),
         "sft_handoff_hash": handoff["handoff_hash"],
         "nominal_rollouts": config.nominal_rollouts,
+        "effective_optimizer_steps": config.total_steps,
+        "retained_rollouts": config.retained_rollouts,
+        "generated_rollouts_min": config.minimum_generated_rollouts,
+        "generated_rollouts_max": config.maximum_generated_rollouts,
+        "maximum_candidate_prompts": config.maximum_candidate_prompts,
+        "candidate_pool_sufficient": candidate_pool_sufficient,
+        "dynamic_group_filter": config.dynamic_group_filter.model_dump(mode="json"),
+        "verl_patch": patch_identity,
         "checkpoint_steps": list(
             range(config.save_steps, config.total_steps + 1, config.save_steps)
         ),
@@ -462,6 +551,7 @@ def build_verl_command(config: GRPOConfig) -> list[str]:
         f"data.train_files={config.train_dataset}",
         f"data.val_files={config.validation_dataset}",
         f"data.train_batch_size={config.prompt_batch_size}",
+        f"data.gen_batch_size={config.prompt_batch_size}",
         f"data.val_batch_size={config.prompt_batch_size}",
         f"data.max_prompt_length={config.max_prompt_length}",
         f"data.max_response_length={config.max_response_length}",
@@ -500,6 +590,10 @@ def build_verl_command(config: GRPOConfig) -> list[str]:
         f"actor_rollout_ref.rollout.agent.num_workers={config.agent_workers}",
         f"actor_rollout_ref.rollout.agent.default_agent_loop={AGENT_LOOP_NAME}",
         f"actor_rollout_ref.rollout.agent.agent_loop_config_path={config.agent_loop_config}",
+        "+algorithm.filter_groups.enable=True",
+        f"+algorithm.filter_groups.metric={config.dynamic_group_filter.metric}",
+        "+algorithm.filter_groups.max_num_gen_batches="
+        f"{config.dynamic_group_filter.max_generation_batches_per_update}",
         "trainer.logger=['console']",
         "trainer.project_name=bird_nl2sql",
         "trainer.experiment_name=qwen2_5_coder_1_5b_agentic_grpo",
@@ -516,14 +610,55 @@ def build_verl_command(config: GRPOConfig) -> list[str]:
     return ["python", "-m", "verl.trainer.main_ppo", *overrides]
 
 
+def _run_manifest_payload(config: GRPOConfig, preflight: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "grpo_run",
+        "run_hash": preflight["run_hash"],
+        "sft_handoff_hash": preflight["sft_handoff_hash"],
+        "verl_commit": config.verl_commit,
+        "container_image": config.container_image,
+        "verl_patch": preflight["verl_patch"],
+        "dynamic_group_filter": preflight["dynamic_group_filter"],
+        "effective_optimizer_steps": preflight["effective_optimizer_steps"],
+        "retained_rollouts": preflight["retained_rollouts"],
+        "generated_rollouts_min": preflight["generated_rollouts_min"],
+        "generated_rollouts_max": preflight["generated_rollouts_max"],
+    }
+
+
+def validate_or_write_run_manifest(
+    config: GRPOConfig, preflight: dict[str, Any]
+) -> Path:
+    """阻止自动恢复到配置或补丁身份不同的旧 GRPO checkpoint。"""
+    manifest_path = config.output_dir / "run_manifest.json"
+    expected = _run_manifest_payload(config, preflight)
+    if manifest_path.is_file():
+        actual: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if actual != expected:
+            raise ValueError("现有 GRPO run_manifest 与本次配置不一致，请使用新的输出目录")
+        return manifest_path
+    if config.output_dir.exists() and any(config.output_dir.iterdir()):
+        raise ValueError("GRPO 输出目录非空但缺少 run_manifest，拒绝自动恢复")
+    write_json(manifest_path, expected)
+    return manifest_path
+
+
 def run_grpo(config: GRPOConfig) -> int:
     preflight = preflight_grpo(config, dry_run=False)
     if not all(
         row["matches_source"] for row in preflight["prepared_datasets"].values()
     ):
         raise FileNotFoundError("veRL JSONL 数据缺失或已过期，请先使用 --prepare 重新生成")
+    validate_or_write_run_manifest(config, preflight)
     environment = dict(os.environ)
     environment["NL2SQL_GRPO_RUN_HASH"] = str(preflight["run_hash"])
+    environment["NL2SQL_GRPO_FILTER_METRICS"] = str(
+        config.output_dir / "dynamic_filter_metrics.jsonl"
+    )
+    environment["NL2SQL_VERL_PATCH_SHA256"] = str(
+        preflight["verl_patch"]["patch_sha256"]
+    )
     completed = subprocess.run(
         build_verl_command(config), check=False, env=environment
     )

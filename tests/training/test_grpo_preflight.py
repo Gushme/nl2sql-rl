@@ -12,11 +12,16 @@ from nl2sql_rl.io_utils import sha256_file, stable_json, write_json, write_jsonl
 from nl2sql_rl.models import AuditStatus, HiddenAnswer, TaskView
 from nl2sql_rl.training.grpo import (
     VERL_COMMIT,
+    VERL_DYNAMIC_FILTER_PATCH_ID,
+    VERL_PATCHED_RAY_TRAINER_SHA256,
+    VERL_RAY_TRAINER_SOURCE_SHA256,
     GRPOConfig,
     build_verl_command,
     preflight_grpo,
     prepare_grpo_datasets,
+    validate_or_write_run_manifest,
     validate_sft_handoff,
+    verl_patch_identity,
 )
 
 
@@ -126,6 +131,17 @@ def test_grpo_preflight_requires_verified_sft_handoff_and_fixed_settings(
     second = preflight_grpo(config, dry_run=True)
     assert first["run_hash"] == second["run_hash"]
     assert first["nominal_rollouts"] == 800
+    assert first["effective_optimizer_steps"] == 100
+    assert first["retained_rollouts"] == 800
+    assert first["generated_rollouts_min"] == 800
+    assert first["generated_rollouts_max"] == 8_000
+    assert first["maximum_candidate_prompts"] == 2_000
+    assert first["candidate_pool_sufficient"] is False
+    assert first["dynamic_group_filter"] == {
+        "enabled": True,
+        "metric": "seq_reward",
+        "max_generation_batches_per_update": 10,
+    }
     assert first["checkpoint_steps"] == [25, 50, 75, 100]
     assert first["data"]["db_id_overlap"] == []
     assert first["prepared_datasets"]["train"]["matches_source"] is False
@@ -134,6 +150,10 @@ def test_grpo_preflight_requires_verified_sft_handoff_and_fixed_settings(
     invalid_config["group_size"] = 8
     with pytest.raises(ValidationError, match="group_size"):
         GRPOConfig.model_validate(invalid_config)
+    invalid_filter = config.model_dump()
+    invalid_filter["dynamic_group_filter"]["enabled"] = False
+    with pytest.raises(ValidationError, match="dynamic_group_filter"):
+        GRPOConfig.model_validate(invalid_filter)
 
 
 def test_handoff_rejects_base_directory_and_modified_weight(tmp_path: Path) -> None:
@@ -177,6 +197,10 @@ def test_verl_command_contains_multiturn_grpo_and_checkpoint_handoff(
     assert "algorithm.adv_estimator=grpo" in command
     assert "actor_rollout_ref.rollout.mode=async" in command
     assert "actor_rollout_ref.rollout.n=4" in command
+    assert "data.gen_batch_size=2" in command
+    assert "+algorithm.filter_groups.enable=True" in command
+    assert "+algorithm.filter_groups.metric=seq_reward" in command
+    assert "+algorithm.filter_groups.max_num_gen_batches=10" in command
     assert "actor_rollout_ref.actor.use_kl_loss=False" in command
     assert "algorithm.use_kl_in_reward=False" in command
     assert "trainer.total_training_steps=100" in command
@@ -184,3 +208,58 @@ def test_verl_command_contains_multiturn_grpo_and_checkpoint_handoff(
     assert "actor_rollout_ref.model.lora_rank=16" in command
     assert str(config.checkpoint_dir) in serialized
     assert VERL_COMMIT not in serialized
+
+
+def test_verl_patch_identity_is_frozen_and_enters_preflight(tmp_path: Path) -> None:
+    identity = verl_patch_identity()
+    assert identity["patch_id"] == VERL_DYNAMIC_FILTER_PATCH_ID
+    assert identity["upstream_ray_trainer_sha256"] == VERL_RAY_TRAINER_SOURCE_SHA256
+    assert identity["patched_ray_trainer_sha256"] == VERL_PATCHED_RAY_TRAINER_SHA256
+    assert identity["patch_sha256"] == sha256_file(Path(identity["patch_path"]))
+    project_root = Path(identity["patch_path"]).parents[1]
+    manifest = json.loads(
+        (project_root / "data/manifests/verl_v0_8_0.json").read_text(encoding="utf-8")
+    )
+    assert manifest["dynamic_group_filter"]["patch_sha256"] == identity["patch_sha256"]
+    assert (
+        manifest["dynamic_group_filter"]["upstream_ray_trainer_sha256"]
+        == VERL_RAY_TRAINER_SOURCE_SHA256
+    )
+    assert (
+        manifest["dynamic_group_filter"]["patched_ray_trainer_sha256"]
+        == VERL_PATCHED_RAY_TRAINER_SHA256
+    )
+    container_script = (project_root / "scripts/run_grpo_container.sh").read_text(
+        encoding="utf-8"
+    )
+    for expected_hash in (
+        identity["patch_sha256"],
+        VERL_RAY_TRAINER_SOURCE_SHA256,
+        VERL_PATCHED_RAY_TRAINER_SHA256,
+    ):
+        assert expected_hash in container_script
+    report = preflight_grpo(_config(tmp_path), dry_run=True)
+    assert report["verl_patch"] == identity
+
+
+def test_grpo_run_manifest_allows_matching_resume_and_rejects_drift(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    preflight = preflight_grpo(config, dry_run=True)
+    manifest = validate_or_write_run_manifest(config, preflight)
+    assert manifest == config.output_dir / "run_manifest.json"
+    assert validate_or_write_run_manifest(config, preflight) == manifest
+
+    changed = dict(preflight)
+    changed["run_hash"] = "b" * 64
+    with pytest.raises(ValueError, match="run_manifest"):
+        validate_or_write_run_manifest(config, changed)
+
+
+def test_grpo_run_manifest_rejects_nonempty_legacy_output(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.output_dir.mkdir(parents=True)
+    (config.output_dir / "global_step_25").mkdir()
+    with pytest.raises(ValueError, match="非空但缺少"):
+        validate_or_write_run_manifest(config, preflight_grpo(config, dry_run=True))

@@ -5,10 +5,20 @@
     "platform": "linux/amd64",
     "registry": "https://hub.docker.com/r/verlai/verl"
   },
-  "schema_version": 1,
+  "dynamic_group_filter": {
+    "max_generation_batches_per_update": 10,
+    "metric": "seq_reward",
+    "patch": "patches/verl-v0.8.0-dynamic-group-filter.patch",
+    "patch_id": "nl2sql-dynamic-group-filter-v1",
+    "patch_sha256": "8af2d2da0883b814bc26e2212315f9dbe13f483e79a5a3da7e4d2207d12953bd",
+    "patched_ray_trainer_sha256": "1de682b934bc07f36a6ef2813a0f0add66544f866cc4e7f0b0d4a07dc1f751cc",
+    "upstream_ray_trainer_sha256": "de58d295cf86656a28196b0718168d4a11666f3e30957b7e166914496c2a6d66"
+  },
+  "schema_version": 2,
   "source": {
     "agent_loop": "https://github.com/volcengine/verl/blob/v0.8.0/verl/experimental/agent_loop/agent_loop.py",
     "commit": "7aed6b230776f963fa09509c10d9c3a767d1102c",
+    "ray_trainer": "https://github.com/volcengine/verl/blob/7aed6b230776f963fa09509c10d9c3a767d1102c/verl/trainer/ppo/ray_trainer.py",
     "repository": "https://github.com/volcengine/verl",
     "tag": "v0.8.0",
     "workflow": "https://github.com/volcengine/verl/blob/v0.8.0/.github/workflows/vllm.yml"

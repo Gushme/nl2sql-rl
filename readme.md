@@ -339,7 +339,11 @@ uv run nl2sql-rl train grpo --prepare --dry-run
 HF_TOKEN=... bash scripts/run_grpo_container.sh
 ```
 
-配置为 100 steps、prompt batch 2、group size 4、名义 800 条 rollout、每 25 步保存；temperature 0.7、top-p 0.9、clip 0.2、KL off、LoRA r=16/alpha=32、LR 1e-6。每个 rollout 最多 10 个 Action，工具错误作为下一轮 observation，因此这是多步 Agentic RL，而非单轮 SQL RLVR。完整说明见 [GPU 运行手册](docs/gpu-runbook.md)。
+配置为 100 次**有效优化更新**、prompt batch 2、group size 4，每 25 次有效更新保存。每个 Prompt 的 4 条轨迹会先按终局 `seq_reward` 分组：Reward 全相同的组不会进入 old log-prob、优势计算或 Actor 更新；不足 2 个非同奖组时继续补采，单次更新最多尝试 10 个生成批次。完成训练时进入优化器的轨迹固定为 800 条，实际生成量为 800–8,000 条，因此该机制减少的是零优势更新，而不是 rollout Token。
+
+veRL v0.8.0 的标准 `main_ppo` 只声明了 `filter_groups` 配置但未接入训练循环。本项目在固定 commit 上应用受 SHA256 保护的补丁；容器会依次校验上游源码、补丁和补丁后 trainer，任一不匹配都拒绝训练。逐步聚合指标写入 `checkpoints/grpo/dynamic_filter_metrics.jsonl`，恢复训练还会校验 `checkpoints/grpo/run_manifest.json`，防止混用旧配置或旧 trainer。
+
+其余参数为 temperature 0.7、top-p 0.9、clip 0.2、KL off、LoRA r=16/alpha=32、LR 1e-6。每个 rollout 最多 10 个 Action，工具错误作为下一轮 observation，因此这是多步 Agentic RL，而非单轮 SQL RLVR。完整说明见 [GPU 运行手册](docs/gpu-runbook.md)。
 
 ## 8. 测试与复现边界
 

@@ -1,0 +1,192 @@
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index d1eaa7b..843f020 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -25,0 +26 @@ from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
+@@ -74,0 +76,2 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
++NL2SQL_DYNAMIC_GROUP_FILTER_PATCH = "nl2sql-dynamic-group-filter-v1"
++
+@@ -1421,0 +1425,25 @@ class RayPPOTrainer:
++        filter_config = self.config.algorithm.get("filter_groups", None)
++        dynamic_filter_enabled = bool(filter_config and filter_config.get("enable", False))
++        dynamic_filter_state = None
++        dynamic_filter_batches = []
++        cumulative_generated_rollouts = 0
++        cumulative_extra_rollouts = 0
++        filter_metrics_path = None
++        if dynamic_filter_enabled:
++            if self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
++                raise ValueError("NL2SQL 同奖组过滤只支持 GRPO 优势估计")
++            if filter_config.metric != "seq_reward":
++                raise ValueError("NL2SQL 同奖组过滤只接受 seq_reward")
++            if self.use_rm or self.config.algorithm.use_kl_in_reward:
++                raise ValueError("NL2SQL 同奖组过滤要求关闭 Reward Model 和 Reward KL")
++            raw_metrics_path = os.environ.get("NL2SQL_GRPO_FILTER_METRICS")
++            if not raw_metrics_path:
++                raise ValueError("启用 NL2SQL 同奖组过滤时必须设置诊断输出路径")
++            filter_metrics_path = Path(raw_metrics_path)
++            from nl2sql_rl.training.grpo_filter import (
++                DynamicGroupFilterExhausted,
++                DynamicGroupFilterState,
++                analyze_reward_groups,
++                append_filter_metrics,
++            )
++
+@@ -1426,9 +1454,16 @@ class RayPPOTrainer:
+-                metrics = {}
+-                timing_raw = {}
+-
+-                with marked_timer("start_profile", timing_raw):
+-                    self._start_profiling(
+-                        not prev_step_profile and curr_step_profile
+-                        if self.config.global_profiler.profile_continuous_steps
+-                        else curr_step_profile
+-                    )
++                if not dynamic_filter_enabled or dynamic_filter_state is None:
++                    metrics = {}
++                    timing_raw = {}
++                    with marked_timer("start_profile", timing_raw):
++                        self._start_profiling(
++                            not prev_step_profile and curr_step_profile
++                            if self.config.global_profiler.profile_continuous_steps
++                            else curr_step_profile
++                        )
++                    if dynamic_filter_enabled:
++                        dynamic_filter_state = DynamicGroupFilterState(
++                            target_groups=self.config.data.train_batch_size,
++                            group_size=self.config.actor_rollout_ref.rollout.n,
++                            max_generation_batches=filter_config.max_num_gen_batches,
++                        )
++                        dynamic_filter_batches = []
+@@ -1471 +1506,2 @@ class RayPPOTrainer:
+-                        self.checkpoint_manager.sleep_replicas()
++                        if not dynamic_filter_enabled:
++                            self.checkpoint_manager.sleep_replicas()
+@@ -1475 +1511,2 @@ class RayPPOTrainer:
+-                        timing_raw.update(combined_gen_output.meta_info["timing"])
++                        for timing_name, timing_value in combined_gen_output.meta_info["timing"].items():
++                            timing_raw[timing_name] = timing_raw.get(timing_name, 0.0) + timing_value
+@@ -1502,4 +1539,79 @@ class RayPPOTrainer:
+-                    # Balance the number of valid tokens across DP ranks.
+-                    # NOTE: This usually changes the order of data in the `batch`,
+-                    # which won't affect the advantage calculation (since it's based on uid),
+-                    # but might affect the loss calculation (due to the change of mini-batching).
++                    if dynamic_filter_enabled:
++                        with marked_timer("reward", timing_raw, color="yellow"):
++                            reward_tensor, _ = extract_reward(batch)
++                        try:
++                            decision = analyze_reward_groups(
++                                batch.non_tensor_batch["uid"].tolist(),
++                                reward_tensor.sum(dim=-1).detach().cpu().tolist(),
++                                group_size=self.config.actor_rollout_ref.rollout.n,
++                            )
++                            selection = dynamic_filter_state.register_batch(decision)
++                        except DynamicGroupFilterExhausted as exc:
++                            failure_summary = dict(exc.summary)
++                            failure_summary.update(
++                                {
++                                    "global_step": self.global_steps,
++                                    "run_hash": os.environ.get("NL2SQL_GRPO_RUN_HASH", ""),
++                                    "cumulative_generated_rollouts": (
++                                        cumulative_generated_rollouts
++                                        + int(failure_summary["generated_rollouts"])
++                                    ),
++                                    "cumulative_extra_rollouts": (
++                                        cumulative_extra_rollouts
++                                        + int(failure_summary["extra_rollouts"])
++                                    ),
++                                }
++                            )
++                            append_filter_metrics(filter_metrics_path, failure_summary)
++                            self.checkpoint_manager.sleep_replicas()
++                            raise
++                        except ValueError:
++                            failure_summary = dynamic_filter_state.summary(status="invalid_group")
++                            failure_summary.update(
++                                {
++                                    "global_step": self.global_steps,
++                                    "run_hash": os.environ.get("NL2SQL_GRPO_RUN_HASH", ""),
++                                    "invalid_batch_rollouts": len(batch),
++                                    "cumulative_generated_rollouts": (
++                                        cumulative_generated_rollouts
++                                        + int(failure_summary["generated_rollouts"])
++                                    ),
++                                    "cumulative_extra_rollouts": (
++                                        cumulative_extra_rollouts
++                                        + int(failure_summary["extra_rollouts"])
++                                    ),
++                                }
++                            )
++                            append_filter_metrics(filter_metrics_path, failure_summary)
++                            self.checkpoint_manager.sleep_replicas()
++                            raise
++                        if selection.selected_indices:
++                            dynamic_filter_batches.append(batch[list(selection.selected_indices)])
++                        if not selection.ready:
++                            continue
++
++                        batch = (
++                            dynamic_filter_batches[0]
++                            if len(dynamic_filter_batches) == 1
++                            else DataProto.concat(dynamic_filter_batches)
++                        )
++                        filter_summary = dynamic_filter_state.summary(status="selected_for_update")
++                        cumulative_generated_rollouts += int(filter_summary["generated_rollouts"])
++                        cumulative_extra_rollouts += int(filter_summary["extra_rollouts"])
++                        filter_summary.update(
++                            {
++                                "global_step": self.global_steps,
++                                "run_hash": os.environ.get("NL2SQL_GRPO_RUN_HASH", ""),
++                                "cumulative_generated_rollouts": cumulative_generated_rollouts,
++                                "cumulative_extra_rollouts": cumulative_extra_rollouts,
++                            }
++                        )
++                        append_filter_metrics(filter_metrics_path, filter_summary)
++                        for metric_name, metric_value in filter_summary.items():
++                            if isinstance(metric_value, (int, float)) and not isinstance(metric_value, bool):
++                                metrics[f"grpo_filter/{metric_name}"] = metric_value
++                        self.checkpoint_manager.sleep_replicas()
++                        dynamic_filter_state = None
++                        dynamic_filter_batches = []
++
++                    # 在数据并行 rank 之间平衡有效 token；该操作可能改变轨迹顺序。
+@@ -1509 +1621 @@ class RayPPOTrainer:
+-                    # compute global_valid tokens
++                    # 记录全局有效 token 数。
+@@ -1511 +1623 @@ class RayPPOTrainer:
+-                    # get images_seqlens
++                    # 收集多模态输入长度；纯文本任务通常为空。
+@@ -1519 +1631 @@ class RayPPOTrainer:
+-                        # compute reward model score
++                        # 必要时计算 Reward Model 分数。
+@@ -1524 +1636 @@ class RayPPOTrainer:
+-                        # extract reward_tensor and reward_extra_infos_dict for training
++                        # 提取训练使用的 Reward 张量和附加字段。
+@@ -1768,0 +1881,26 @@ class RayPPOTrainer:
++        if dynamic_filter_enabled:
++            if dynamic_filter_state is None:
++                dynamic_filter_state = DynamicGroupFilterState(
++                    target_groups=self.config.data.train_batch_size,
++                    group_size=self.config.actor_rollout_ref.rollout.n,
++                    max_generation_batches=filter_config.max_num_gen_batches,
++                )
++            failure_summary = dynamic_filter_state.summary(status="data_exhausted")
++            failure_summary.update(
++                {
++                    "global_step": self.global_steps,
++                    "run_hash": os.environ.get("NL2SQL_GRPO_RUN_HASH", ""),
++                    "cumulative_generated_rollouts": (
++                        cumulative_generated_rollouts + int(failure_summary["generated_rollouts"])
++                    ),
++                    "cumulative_extra_rollouts": (
++                        cumulative_extra_rollouts + int(failure_summary["extra_rollouts"])
++                    ),
++                }
++            )
++            append_filter_metrics(filter_metrics_path, failure_summary)
++            self.checkpoint_manager.sleep_replicas()
++            self._shutdown_dump_executor()
++            progress_bar.close()
++            raise RuntimeError("训练数据耗尽，未完成全部有效 GRPO 更新")
++

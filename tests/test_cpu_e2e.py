@@ -25,6 +25,11 @@ def test_cpu_e2e_covers_harness_teacher_sft_eval_and_grpo(tmp_path: Path) -> Non
     assert report["sft"]["conversations"] == 2
     assert report["evaluation"]["metrics"]["ex"] == 1.0
     assert report["grpo"]["nominal_rollouts"] == 800
+    assert report["grpo"]["effective_optimizer_steps"] == 100
+    assert report["grpo"]["retained_rollouts"] == 800
+    assert report["grpo"]["generated_rollouts_min"] == 800
+    assert report["grpo"]["generated_rollouts_max"] == 8_000
+    assert report["grpo"]["dynamic_group_filter"]["metric"] == "seq_reward"
     assert report["grpo"]["assistant_mask_tokens"] > 0
     assert report["grpo"]["tool_mask_tokens"] > 0
     assert report["external_teacher_api_called"] is False

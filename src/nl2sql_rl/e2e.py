@@ -397,6 +397,11 @@ def run_cpu_e2e(output_root: Path, *, agent_loop_config: Path) -> dict[str, Any]
         "grpo": {
             "run_hash": grpo_preflight["run_hash"],
             "nominal_rollouts": grpo_preflight["nominal_rollouts"],
+            "effective_optimizer_steps": grpo_preflight["effective_optimizer_steps"],
+            "retained_rollouts": grpo_preflight["retained_rollouts"],
+            "generated_rollouts_min": grpo_preflight["generated_rollouts_min"],
+            "generated_rollouts_max": grpo_preflight["generated_rollouts_max"],
+            "dynamic_group_filter": grpo_preflight["dynamic_group_filter"],
             "dataset_train_count": grpo_data["train"]["count"],
             "assistant_mask_tokens": sum(fake_rollout.response_mask),
             "tool_mask_tokens": len(fake_rollout.response_mask)

@@ -1,2 +1,2 @@
-# 官方镜像已包含 GPU 依赖，这里仅把 veRL 源码固定到 release commit。
+# 该 URL 只记录上游来源；正式 GRPO 必须由 install_patched_verl.sh 校验并安装补丁版本。
 verl @ git+https://github.com/volcengine/verl.git@7aed6b230776f963fa09509c10d9c3a767d1102c

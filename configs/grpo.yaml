@@ -34,3 +34,7 @@ max_response_length: 12288
 n_gpus_per_node: 1
 agent_workers: 4
 gpu_memory_utilization: 0.6
+dynamic_group_filter:
+  enabled: true
+  metric: seq_reward
+  max_generation_batches_per_update: 10
